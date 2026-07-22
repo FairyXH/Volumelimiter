@@ -1,6 +1,7 @@
 package io.github.fairyxh.volumelimiter.ui;
 
 
+import android.annotation.SuppressLint;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -100,10 +101,11 @@ public final class SettingsActivity extends RemotePreferencesActivity {
         }
     }
 
+    @SuppressLint("SetTextI18n")
     @Override
     protected void renderContent() {
         addTitle("音量限制");
-        addBody("配置通过 LSPosed Remote Preferences 实时同步到 system_server。");
+        addBody("限制系统最大音量");
 
         addSection("总配置");
         addLimiter("启用音量限制", PreferenceStorage.KEY_ENABLED,
@@ -153,7 +155,7 @@ public final class SettingsActivity extends RemotePreferencesActivity {
         }
 
         renderTemplates();
-        renderNewAppBehavior();
+//        renderNewAppBehavior();
         renderBackup();
 
         addSection("高级设置");
@@ -217,7 +219,7 @@ public final class SettingsActivity extends RemotePreferencesActivity {
     }
 
     private void renderNewAppBehavior() {
-        addSection("新安装应用行为");
+        addSection("新安装应用行为(弃用)");
         addSwitch("新应用自动套用模板", PreferenceStorage.KEY_AUTO_APPLY_NEW_APPS,
                 false, null);
         List<VolumeTemplate> templates = TemplateRepository.read(preferences);
