@@ -2,6 +2,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
     <queries>
         <intent>
             <action android:name="android.intent.action.MAIN" />
@@ -26,5 +30,14 @@
                 <category android:name="de.robv.android.xposed.category.MODULE_SETTINGS" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".ui.AppRuleActivity"
+            android:exported="false" />
+        <activity
+            android:name=".ui.TemplateEditActivity"
+            android:exported="false" />
+        <activity
+            android:name=".ui.ConfiguredRulesActivity"
+            android:exported="false" />
     </application>
 </manifest>

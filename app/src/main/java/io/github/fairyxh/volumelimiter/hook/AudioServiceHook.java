@@ -1,5 +1,9 @@
 package io.github.fairyxh.volumelimiter.hook;
 
+import android.os.Handler;
+import android.os.HandlerThread;
+
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.HashSet;
@@ -32,9 +36,23 @@ public final class AudioServiceHook {
             return 0;
         }
         DeviceRouteHook routeHook = new DeviceRouteHook(classLoader, audioServiceClass);
-        ForegroundAppResolver appResolver = new ForegroundAppResolver(classLoader);
+        AudioFocusTracker focusTracker = new AudioFocusTracker();
+        focusTracker.install(module, classLoader);
+        AudioAppResolver appResolver = new AudioAppResolver(
+                focusTracker, new ForegroundAppResolver(classLoader));
         VolumeAdjustHook limiter = new VolumeAdjustHook(
                 configManager, routeHook, appResolver, audioServiceClass);
+        HandlerThread correctionThread = new HandlerThread("Volumelimiter-correction");
+        correctionThread.start();
+        Handler correctionHandler = new Handler(correctionThread.getLooper());
+        Runnable correction = limiter::enforceCurrentLimits;
+        Runnable requestCorrection = () -> {
+            correctionHandler.removeCallbacks(correction);
+            correctionHandler.postDelayed(correction, 100L);
+        };
+        focusTracker.setOwnerChangeListener(requestCorrection::run);
+        ForegroundChangeHook.install(module, classLoader, requestCorrection);
+        hookConstructors(audioServiceClass, limiter);
         Set<String> installedSignatures = new HashSet<>();
         int installed = 0;
 
@@ -55,6 +73,24 @@ public final class AudioServiceHook {
         LogUtils.info("Installed " + installed + " AudioService hooks on API "
                 + android.os.Build.VERSION.SDK_INT);
         return installed;
+    }
+
+    private void hookConstructors(Class<?> audioServiceClass, VolumeAdjustHook limiter) {
+        for (Constructor<?> constructor : audioServiceClass.getDeclaredConstructors()) {
+            try {
+                constructor.setAccessible(true);
+                module.hook(constructor)
+                        .setPriority(XposedInterface.PRIORITY_LOWEST)
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(chain -> {
+                            Object result = chain.proceed();
+                            limiter.rememberAudioService(chain.getThisObject());
+                            return result;
+                        });
+            } catch (Throwable error) {
+                LogUtils.debug("Unable to hook AudioService constructor " + constructor + ": " + error);
+            }
+        }
     }
 
     private int hookSetMethod(Method method, VolumeAdjustHook limiter) {

@@ -1,359 +1,527 @@
 package io.github.fairyxh.volumelimiter.ui;
 
-import android.app.Activity;
+
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
-import android.graphics.Typeface;
+import android.net.Uri;
+
 import android.os.Bundle;
-import android.view.Gravity;
+import android.os.Handler;
+import android.os.Looper;
+
+import android.text.Editable;
+import android.text.TextWatcher;
+import android.view.View;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
-import android.widget.CompoundButton;
+import android.widget.EditText;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
-import android.widget.SeekBar;
-import android.widget.Space;
+import android.widget.ListView;
+import android.widget.Spinner;
 import android.widget.Switch;
-import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONException;
+
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.text.Collator;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
-import io.github.fairyxh.volumelimiter.VolumeLimiterApp;
+import io.github.fairyxh.volumelimiter.config.BackupCodec;
 import io.github.fairyxh.volumelimiter.config.PreferenceStorage;
+import io.github.fairyxh.volumelimiter.config.TemplateRepository;
+import io.github.fairyxh.volumelimiter.config.VolumeTemplate;
 import io.github.fairyxh.volumelimiter.utils.AndroidVersionUtils;
-import io.github.libxposed.service.XposedService;
 
-public final class SettingsActivity extends Activity implements VolumeLimiterApp.ServiceListener {
+public final class SettingsActivity extends RemotePreferencesActivity {
+    private static final int REQUEST_EXPORT = 100;
+    private static final int REQUEST_IMPORT = 101;
+
+
     private static final class AppEntry {
         final String packageName;
         final String label;
+        final String searchText;
 
         AppEntry(String packageName, String label) {
             this.packageName = packageName;
             this.label = label;
+            this.searchText = (label + "\n" + packageName).toLowerCase(Locale.ROOT);
+        }
+
+        @Override
+        public String toString() {
+            return label + "\n" + packageName;
         }
     }
 
-    private LinearLayout content;
-    private XposedService service;
-    private SharedPreferences preferences;
+    private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private volatile List<AppEntry> cachedApps;
 
     @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
         setTitle("Volumelimiter");
-        ScrollView scrollView = new ScrollView(this);
-        content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(20), dp(16), dp(20), dp(32));
-        scrollView.addView(content, new ScrollView.LayoutParams(
-                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
-        setContentView(scrollView);
-        renderDisconnected();
-    }
-
-    @Override
-    protected void onStart() {
-        super.onStart();
-        VolumeLimiterApp.addListener(this);
-    }
-
-    @Override
-    protected void onStop() {
-        VolumeLimiterApp.removeListener(this);
-        super.onStop();
-    }
-
-    @Override
-    public void onServiceChanged(XposedService boundService) {
-        runOnUiThread(() -> {
-            service = boundService;
-            preferences = service == null ? null
-                    : service.getRemotePreferences(PreferenceStorage.GROUP);
-            render();
-        });
-    }
-
-    private void render() {
-        content.removeAllViews();
-        addTitle("音量限制");
-        addBody(service == null
-                ? "LSPosed 服务未连接，配置暂不可写入"
-                : "LSPosed API " + service.getApiVersion() + " · 已连接");
-        if (preferences == null) {
-            return;
+        worker.execute(() -> cachedApps = loadLaunchableApps());
+        String packageName = getIntent().getStringExtra(AppRuleActivity.EXTRA_PACKAGE);
+        if (packageName != null && !packageName.isBlank()) {
+            getIntent().removeExtra(AppRuleActivity.EXTRA_PACKAGE);
+            startActivity(new Intent(this, AppRuleActivity.class)
+                    .putExtra(AppRuleActivity.EXTRA_PACKAGE, packageName));
         }
+    }
+
+    @Override
+    protected void onDestroy() {
+        worker.shutdownNow();
+        super.onDestroy();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (preferences != null) {
+            content.removeAllViews();
+            renderContent();
+        }
+    }
+
+    @Override
+    protected void renderContent() {
+        addTitle("音量限制");
+        addBody("配置通过 LSPosed Remote Preferences 实时同步到 system_server。");
 
         addSection("总配置");
-        addBody("默认作用于所有输出设备。设备或前台应用有自己的配置时，按应用 > 设备 > 总配置的顺序覆盖。");
         addLimiter("启用音量限制", PreferenceStorage.KEY_ENABLED,
-                PreferenceStorage.KEY_MASTER_PERCENT, "所有设备的默认上限");
+                PreferenceStorage.KEY_MASTER_PERCENT, "所有设备和应用的默认上限");
 
         addSection("输出设备覆盖");
-        addBody("仅开启需要单独覆盖总配置的设备。未开启的设备继续使用总配置。");
         for (PreferenceStorage.DeviceEntry entry : PreferenceStorage.DEVICES.values()) {
             addLimiter(entry.label, PreferenceStorage.deviceEnabledKey(entry.key),
                     PreferenceStorage.devicePercentKey(entry.key), "覆盖总配置");
         }
 
-        addSection("分应用限制");
-        addSwitch("启用分应用限制", "仅当前台应用有已启用规则时覆盖设备/总配置",
-                PreferenceStorage.KEY_PER_APP_ENABLED, false);
-        for (String packageName : sortedConfiguredPackages()) {
-            addAppLimiter(packageName);
+        addSection("应用规则");
+        addSwitch("启用分应用限制", PreferenceStorage.KEY_PER_APP_ENABLED, false, null);
+        addBody("识别优先级：音量调用者 > AudioFocus 播放应用 > 前台 Activity。");
+        Set<String> configured = PreferenceStorage.readAppPackages(preferences);
+        addBody("已配置 " + configured.size() + " 个应用");
+        Button manageApps = new Button(this);
+        manageApps.setText("搜索、选择与批量应用模板");
+        manageApps.setOnClickListener(view -> showAppManager());
+        content.addView(manageApps, matchWrap());
+        Button configuredRules = new Button(this);
+        configuredRules.setText("管理已配置应用规则");
+        configuredRules.setOnClickListener(view -> startActivity(
+                new Intent(this, ConfiguredRulesActivity.class)));
+        content.addView(configuredRules, matchWrap());
+        List<String> configuredPreview = new ArrayList<>(configured);
+        configuredPreview.sort(String::compareToIgnoreCase);
+        if (configuredPreview.size() > 20) {
+            configuredPreview = new ArrayList<>(configuredPreview.subList(0, 20));
         }
-        Button addApp = new Button(this);
-        addApp.setText("添加应用规则");
-        addApp.setOnClickListener(view -> showAppPicker());
-        content.addView(addApp, matchWrap());
+        for (String packageName : configuredPreview) {
+            Button edit = new Button(this);
+            edit.setText(appLabel(packageName) + "\n" + packageName);
+            edit.setOnClickListener(view -> startActivity(new Intent(this, AppRuleActivity.class)
+                    .putExtra(AppRuleActivity.EXTRA_PACKAGE, packageName)));
+            content.addView(edit, matchWrap());
+        }
+        if (configured.size() > configuredPreview.size()) {
+            addBody("其余 " + (configured.size() - configuredPreview.size())
+                    + " 条规则请在应用管理中搜索。");
+        }
 
-        addSection("音量类别安全上限（可选）");
-        addBody("若启用，作为额外安全上限与上述结果取较小值。例如媒体设为 60%，即使某设备覆盖为 80%，媒体仍最多 60%。");
+        addSection("音量类别安全上限");
         for (PreferenceStorage.StreamEntry entry : PreferenceStorage.STREAMS.values()) {
             addLimiter(entry.label, PreferenceStorage.streamEnabledKey(entry.key),
-                    PreferenceStorage.streamPercentKey(entry.key), "额外安全上限");
+                    PreferenceStorage.streamPercentKey(entry.key), "所有规则之上的额外安全上限");
         }
 
+        renderTemplates();
+        renderNewAppBehavior();
+        renderBackup();
+
         addSection("高级设置");
-        addSwitch("Debug 日志", "仅排查兼容问题时开启", PreferenceStorage.KEY_DEBUG, false);
-        addInfoRow("Hook 状态", "模块是否成功加载请查看 LSPosed 日志");
-        addInfoRow("Android", AndroidVersionUtils.describe());
-        addInfoRow("ROM", AndroidVersionUtils.romDescription());
-        addInfoRow("作用域", "system / system_server");
+        addSwitch("Debug 日志", PreferenceStorage.KEY_DEBUG, false, null);
+        addBody("仅排查问题时开启。日志包含应用候选、AudioFocus、前台应用、命中规则、流、设备与最终上限。");
+        addBody("Android：" + AndroidVersionUtils.describe());
+        addBody("ROM：" + AndroidVersionUtils.romDescription());
+
+        addSection("About");
+        addBody("Volumelimiter\n作者：FairyXH");
+        Button github = new Button(this);
+        github.setText("github.com/FairyXH/Volumelimiter");
+        github.setOnClickListener(view -> startActivity(new Intent(Intent.ACTION_VIEW,
+                Uri.parse("https://github.com/FairyXH/Volumelimiter"))));
+        content.addView(github, matchWrap());
 
         Button reset = new Button(this);
         reset.setText("重置全部设置");
-        reset.setOnClickListener(view -> confirmReset());
+        reset.setOnClickListener(view -> new AlertDialog.Builder(this)
+                .setTitle("重置全部设置？")
+                .setMessage("将清除全局设置、应用规则、模板和新应用行为配置。")
+                .setPositiveButton("重置", (dialog, which) -> {
+                    if (preferences.edit().clear().commit()) {
+                        content.removeAllViews();
+                        renderContent();
+                    } else {
+                        toast("重置失败");
+                    }
+                }).setNegativeButton("取消", null).show());
         content.addView(reset, matchWrap());
     }
 
-    private void renderDisconnected() {
-        content.removeAllViews();
-        addTitle("音量限制");
-        addBody("正在连接 LSPosed 服务…");
-    }
-
-    private void addLimiter(String title, String enabledKey, String percentKey, String summary) {
-        LinearLayout block = new LinearLayout(this);
-        block.setOrientation(LinearLayout.VERTICAL);
-        block.setPadding(0, dp(8), 0, dp(12));
-
-        Switch enabled = new Switch(this);
-        enabled.setText(title);
-        enabled.setTextSize(16);
-        enabled.setChecked(preferences.getBoolean(enabledKey, false));
-        block.addView(enabled, matchWrap());
-
-        TextView detail = addText(summary, 13, 0xff777777);
-        block.addView(detail, matchWrap());
-
-        TextView value = new TextView(this);
-        value.setTextSize(14);
-        int current = PreferenceStorage.readPercent(preferences, percentKey, 100);
-        value.setText("当前限制：" + current + "%");
-        block.addView(value, matchWrap());
-
-        SeekBar seekBar = new SeekBar(this);
-        seekBar.setMax(100);
-        seekBar.setProgress(current);
-        seekBar.setEnabled(enabled.isChecked());
-        block.addView(seekBar, matchWrap());
-
-        enabled.setOnCheckedChangeListener((button, checked) -> {
-            seekBar.setEnabled(checked);
-            edit().putBoolean(enabledKey, checked).apply();
-        });
-        seekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
-                value.setText("当前限制：" + progress + "%");
-            }
-
-            @Override
-            public void onStartTrackingTouch(SeekBar bar) {
-            }
-
-            @Override
-            public void onStopTrackingTouch(SeekBar bar) {
-                edit().putInt(percentKey, bar.getProgress()).apply();
-            }
-        });
-        content.addView(block, matchWrap());
-    }
-
-    private void addAppLimiter(String packageName) {
-        String label;
-        try {
-            PackageManager pm = getPackageManager();
-            label = pm.getApplicationLabel(pm.getApplicationInfo(packageName, 0)).toString();
-        } catch (PackageManager.NameNotFoundException ignored) {
-            label = packageName;
+    private void renderTemplates() {
+        addSection("模板");
+        List<VolumeTemplate> templates = TemplateRepository.read(preferences);
+        addBody("模板包含应用默认上限、音频流上限和输出设备上限。");
+        Button create = new Button(this);
+        create.setText("创建模板");
+        create.setOnClickListener(view -> startActivity(new Intent(this, TemplateEditActivity.class)));
+        content.addView(create, matchWrap());
+        for (VolumeTemplate template : templates) {
+            LinearLayout row = new LinearLayout(this);
+            Button edit = new Button(this);
+            edit.setText(template.name + " · " + template.masterPercent + "%");
+            edit.setOnClickListener(view -> startActivity(new Intent(this, TemplateEditActivity.class)
+                    .putExtra(TemplateEditActivity.EXTRA_TEMPLATE_ID, template.id)));
+            row.addView(edit, new LinearLayout.LayoutParams(0,
+                    LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+            Button copy = new Button(this);
+            copy.setText("复制");
+            copy.setOnClickListener(view -> startActivity(new Intent(this, TemplateEditActivity.class)
+                    .putExtra(TemplateEditActivity.EXTRA_TEMPLATE_ID, template.id)
+                    .putExtra(TemplateEditActivity.EXTRA_COPY, true)));
+            row.addView(copy);
+            Button delete = new Button(this);
+            delete.setText("删除");
+            delete.setOnClickListener(view -> confirmDeleteTemplate(template));
+            row.addView(delete);
+            content.addView(row, matchWrap());
         }
-        addLimiter(label + "\n" + packageName,
-                PreferenceStorage.appEnabledKey(packageName),
-                PreferenceStorage.appPercentKey(packageName), "前台时覆盖设备/总配置");
-        Button remove = new Button(this);
-        remove.setText("删除 " + label + " 规则");
-        remove.setOnClickListener(view -> removeAppRule(packageName));
-        content.addView(remove, matchWrap());
     }
 
-    private List<String> sortedConfiguredPackages() {
-        List<String> packages = new ArrayList<>(PreferenceStorage.readAppPackages(preferences));
-        packages.sort(String::compareToIgnoreCase);
-        return packages;
+    private void renderNewAppBehavior() {
+        addSection("新安装应用行为");
+        addSwitch("新应用自动套用模板", PreferenceStorage.KEY_AUTO_APPLY_NEW_APPS,
+                false, null);
+        List<VolumeTemplate> templates = TemplateRepository.read(preferences);
+        Spinner spinner = new Spinner(this);
+        List<String> names = new ArrayList<>();
+        names.add("未选择默认模板");
+        int selected = 0;
+        String selectedId = preferences.getString(PreferenceStorage.KEY_DEFAULT_TEMPLATE_ID, "");
+        for (int i = 0; i < templates.size(); i++) {
+            names.add(templates.get(i).name);
+            if (templates.get(i).id.equals(selectedId)) {
+                selected = i + 1;
+            }
+        }
+        spinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, names));
+        spinner.setSelection(selected);
+        spinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            public void onItemSelected(android.widget.AdapterView<?> parent, View view,
+                                       int position, long id) {
+                preferences.edit().putString(PreferenceStorage.KEY_DEFAULT_TEMPLATE_ID,
+                        position == 0 ? "" : templates.get(position - 1).id).apply();
+            }
+            public void onNothingSelected(android.widget.AdapterView<?> parent) { }
+        });
+        content.addView(spinner, matchWrap());
+        addSwitch("自动配置后发送系统通知", PreferenceStorage.KEY_NOTIFY_NEW_APPS,
+                false, null);
     }
 
-    private void showAppPicker() {
-        List<AppEntry> apps = loadLaunchableApps();
-        if (apps.isEmpty()) {
-            Toast.makeText(this, "未找到可选择的应用", Toast.LENGTH_SHORT).show();
+    private void renderBackup() {
+        addSection("配置导入导出");
+        Button export = new Button(this);
+        export.setText("导出 JSON 备份");
+        export.setOnClickListener(view -> startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT)
+                .setType("application/json").putExtra(Intent.EXTRA_TITLE,
+                        "volumelimiter_backup.json"), REQUEST_EXPORT));
+        content.addView(export, matchWrap());
+        Button importButton = new Button(this);
+        importButton.setText("导入 JSON 备份");
+        importButton.setOnClickListener(view -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .setType("application/json").addCategory(Intent.CATEGORY_OPENABLE), REQUEST_IMPORT));
+        content.addView(importButton, matchWrap());
+    }
+
+    private void showAppManager() {
+        List<AppEntry> all = cachedApps;
+        if (all == null) {
+            toast("应用列表仍在后台加载，请稍后重试");
+            worker.execute(() -> cachedApps = loadLaunchableApps());
             return;
         }
-        String[] labels = new String[apps.size()];
-        for (int i = 0; i < apps.size(); i++) {
-            AppEntry app = apps.get(i);
-            labels[i] = app.label + "\n" + app.packageName;
-        }
-        new AlertDialog.Builder(this)
-                .setTitle("选择应用")
-                .setItems(labels, (dialog, which) -> addAppRule(apps.get(which).packageName))
-                .setNegativeButton("取消", null)
-                .show();
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        int padding = dp(12);
+        panel.setPadding(padding, padding, padding, padding);
+        EditText query = new EditText(this);
+        query.setHint("搜索应用名称或包名");
+        query.setSingleLine(true);
+        panel.addView(query, matchWrap());
+        ListView list = new ListView(this);
+        list.setChoiceMode(ListView.CHOICE_MODE_MULTIPLE);
+        ArrayAdapter<AppEntry> adapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_list_item_multiple_choice, new ArrayList<>(all));
+        list.setAdapter(adapter);
+        Set<String> selectedPackages = new HashSet<>();
+        list.setOnItemClickListener((parent, view, position, id) -> {
+            AppEntry entry = adapter.getItem(position);
+            if (list.isItemChecked(position)) {
+                selectedPackages.add(entry.packageName);
+            } else {
+                selectedPackages.remove(entry.packageName);
+            }
+        });
+        panel.addView(list, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(400)));
+        LinearLayout actions = new LinearLayout(this);
+        Button selectAll = new Button(this);
+        selectAll.setText("全选结果");
+        selectAll.setOnClickListener(view -> {
+            for (int i = 0; i < adapter.getCount(); i++) {
+                AppEntry entry = adapter.getItem(i);
+                selectedPackages.add(entry.packageName);
+                list.setItemChecked(i, true);
+            }
+        });
+        actions.addView(selectAll, new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        Button clear = new Button(this);
+        clear.setText("取消全选");
+        clear.setOnClickListener(view -> {
+            selectedPackages.clear();
+            list.clearChoices();
+        });
+        actions.addView(clear, new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        panel.addView(actions, matchWrap());
+
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("应用管理")
+                .setView(panel).setPositiveButton("批量应用模板", null)
+                .setNeutralButton("添加规则", null).setNegativeButton("关闭", null).create();
+        dialog.setOnShowListener(ignored -> {
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(view -> {
+                Set<String> selected = new HashSet<>(selectedPackages);
+                if (selected.isEmpty()) {
+                    toast("请先选择应用");
+                    return;
+                }
+                Set<String> configured = PreferenceStorage.readAppPackages(preferences);
+                configured.addAll(selected);
+                SharedPreferences.Editor editor = preferences.edit()
+                        .putStringSet(PreferenceStorage.KEY_APP_PACKAGES, configured)
+                        .putBoolean(PreferenceStorage.KEY_PER_APP_ENABLED, true);
+                for (String packageName : selected) {
+                    editor.putBoolean(PreferenceStorage.appEnabledKey(packageName), true)
+                            .putInt(PreferenceStorage.appPercentKey(packageName), 100);
+                }
+                if (editor.commit()) {
+                    dialog.dismiss();
+                    content.removeAllViews();
+                    renderContent();
+                } else toast("保存应用规则失败");
+            });
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+                Set<String> selected = new HashSet<>(selectedPackages);
+                if (selected.isEmpty()) {
+                    toast("请先选择应用");
+                } else {
+                    showTemplatePicker(selected, dialog);
+                }
+            });
+        });
+        query.addTextChangedListener(new TextWatcher() {
+            Runnable pending;
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+                if (pending != null) mainHandler.removeCallbacks(pending);
+                String term = s.toString().trim().toLowerCase(Locale.ROOT);
+                pending = () -> worker.execute(() -> {
+                    List<AppEntry> filtered = new ArrayList<>();
+                    for (AppEntry entry : all) {
+                        if (term.isEmpty() || entry.searchText.contains(term)) filtered.add(entry);
+                    }
+                    mainHandler.post(() -> {
+                        adapter.clear();
+                        adapter.addAll(filtered);
+                        adapter.notifyDataSetChanged();
+                        list.clearChoices();
+                        for (int i = 0; i < adapter.getCount(); i++) {
+                            list.setItemChecked(i, selectedPackages.contains(
+                                    adapter.getItem(i).packageName));
+                        }
+                    });
+                });
+                mainHandler.postDelayed(pending, 150);
+            }
+            public void afterTextChanged(Editable s) { }
+        });
+        dialog.show();
     }
+
+    private void showTemplatePicker(Set<String> packages, AlertDialog parent) {
+        List<VolumeTemplate> templates = TemplateRepository.read(preferences);
+        if (templates.isEmpty()) {
+            toast("请先创建模板");
+            return;
+        }
+        String[] names = templates.stream().map(template -> template.name).toArray(String[]::new);
+        new AlertDialog.Builder(this).setTitle("选择模板").setItems(names, (dialog, which) -> {
+            if (TemplateRepository.applyToPackages(preferences, templates.get(which), packages)) {
+                toast("已为 " + packages.size() + " 个应用应用模板");
+                parent.dismiss();
+                content.removeAllViews();
+                renderContent();
+            } else toast("批量应用模板失败");
+        }).setNegativeButton("取消", null).show();
+    }
+
 
     private List<AppEntry> loadLaunchableApps() {
-        Intent intent = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
-        List<ResolveInfo> resolved = getPackageManager().queryIntentActivities(intent, 0);
-        List<AppEntry> apps = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
-        for (ResolveInfo info : resolved) {
-            String packageName = info.activityInfo.packageName;
-            if (getPackageName().equals(packageName) || !seen.add(packageName)) {
-                continue;
+        List<ApplicationInfo> installed = getPackageManager().getInstalledApplications(0);
+        List<AppEntry> result = new ArrayList<>();
+        for (ApplicationInfo info : installed) {
+            if (!info.packageName.equals(getPackageName())) {
+                result.add(new AppEntry(info.packageName,
+                        info.loadLabel(getPackageManager()).toString()));
             }
-            apps.add(new AppEntry(packageName, info.loadLabel(getPackageManager()).toString()));
         }
-        apps.sort(Comparator.comparing(entry -> entry.label, String.CASE_INSENSITIVE_ORDER));
-        return apps;
+        Collator collator = Collator.getInstance(Locale.getDefault());
+        result.sort(Comparator.comparing(entry -> entry.label, collator));
+        return List.copyOf(result);
     }
 
-    private void addAppRule(String packageName) {
-        Set<String> packages = PreferenceStorage.readAppPackages(preferences);
-        packages.add(packageName);
-        boolean saved = edit().putStringSet(PreferenceStorage.KEY_APP_PACKAGES, packages)
-                .putBoolean(PreferenceStorage.appEnabledKey(packageName), true)
-                .putInt(PreferenceStorage.appPercentKey(packageName), 100)
-                .commit();
-        if (saved) {
-            render();
-        } else {
-            Toast.makeText(this, "保存应用规则失败", Toast.LENGTH_SHORT).show();
-        }
-    }
-
-    private void removeAppRule(String packageName) {
-        Set<String> packages = PreferenceStorage.readAppPackages(preferences);
-        packages.remove(packageName);
-        boolean saved = edit().putStringSet(PreferenceStorage.KEY_APP_PACKAGES, packages)
-                .remove(PreferenceStorage.appEnabledKey(packageName))
-                .remove(PreferenceStorage.appPercentKey(packageName))
-                .commit();
-        if (saved) {
-            render();
-        } else {
-            Toast.makeText(this, "删除应用规则失败", Toast.LENGTH_SHORT).show();
-        }
-    }
-
-    private void confirmReset() {
-        new AlertDialog.Builder(this)
-                .setTitle("重置全部设置？")
-                .setMessage("将关闭所有限制并清除设备、应用和音量类别配置。")
-                .setPositiveButton("重置", (dialog, which) -> {
-                    if (edit().clear().commit()) {
-                        render();
-                        Toast.makeText(this, "设置已重置", Toast.LENGTH_SHORT).show();
-                    } else {
-                        Toast.makeText(this, "重置失败", Toast.LENGTH_SHORT).show();
+    private void confirmDeleteTemplate(VolumeTemplate template) {
+        new AlertDialog.Builder(this).setTitle("删除模板？").setMessage(template.name)
+                .setPositiveButton("删除", (dialog, which) -> {
+                    List<VolumeTemplate> templates = new ArrayList<>(TemplateRepository.read(preferences));
+                    templates.removeIf(item -> item.id.equals(template.id));
+                    SharedPreferences.Editor editor = preferences.edit();
+                    try {
+                        editor.putString(PreferenceStorage.KEY_TEMPLATES_JSON,
+                                TemplateRepository.serialize(templates));
+                    } catch (JSONException error) {
+                        toast("模板数据无效");
+                        return;
                     }
-                })
-                .setNegativeButton("取消", null)
-                .show();
+                    if (template.id.equals(preferences.getString(
+                            PreferenceStorage.KEY_DEFAULT_TEMPLATE_ID, ""))) {
+                        editor.remove(PreferenceStorage.KEY_DEFAULT_TEMPLATE_ID);
+                    }
+                    if (editor.commit()) {
+                        content.removeAllViews();
+                        renderContent();
+                    } else toast("删除模板失败");
+                }).setNegativeButton("取消", null).show();
     }
 
-    private void addSwitch(String title, String summary, String key, boolean fallback) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.VERTICAL);
-        row.setPadding(0, dp(8), 0, dp(12));
+    private void addSwitch(String title, String key, boolean fallback,
+                           java.util.function.Consumer<Boolean> callback) {
         Switch toggle = new Switch(this);
         toggle.setText(title);
         toggle.setTextSize(16);
         toggle.setChecked(preferences.getBoolean(key, fallback));
-        toggle.setOnCheckedChangeListener((CompoundButton button, boolean checked) ->
-                edit().putBoolean(key, checked).apply());
-        row.addView(toggle, matchWrap());
-        row.addView(addText(summary, 14, 0xff777777), matchWrap());
-        content.addView(row, matchWrap());
+        toggle.setOnCheckedChangeListener((button, checked) -> {
+            preferences.edit().putBoolean(key, checked).apply();
+            if (callback != null) callback.accept(checked);
+        });
+        content.addView(toggle, matchWrap());
     }
 
-    private void addSection(String text) {
-        Space space = new Space(this);
-        content.addView(space, new LinearLayout.LayoutParams(1, dp(14)));
-        TextView view = addText(text, 18, 0xff3f51b5);
-        view.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        content.addView(view, matchWrap());
-    }
-
-    private void addInfoRow(String name, String value) {
-        TextView view = addText(name + "\n" + value, 14, 0xff666666);
-        view.setPadding(0, dp(7), 0, dp(7));
-        content.addView(view, matchWrap());
-    }
-
-    private void addTitle(String text) {
-        TextView title = addText(text, 26, 0xff202124);
-        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        content.addView(title, matchWrap());
-    }
-
-    private TextView addBody(String text) {
-        TextView body = addText(text, 14, 0xff666666);
-        body.setPadding(0, dp(4), 0, dp(12));
-        content.addView(body, matchWrap());
-        return body;
-    }
-
-    private TextView addText(String text, int size, int color) {
-        TextView view = new TextView(this);
-        view.setText(text);
-        view.setTextSize(size);
-        view.setTextColor(color);
-        view.setGravity(Gravity.START);
-        return view;
-    }
-
-    private SharedPreferences.Editor edit() {
-        SharedPreferences.Editor editor = preferences.edit();
-        if (editor == null) {
-            throw new IllegalStateException("LSPosed remote preferences are read-only");
+    private String appLabel(String packageName) {
+        List<AppEntry> apps = cachedApps;
+        if (apps != null) {
+            for (AppEntry entry : apps) {
+                if (entry.packageName.equals(packageName)) {
+                    return entry.label;
+                }
+            }
+            return packageName;
         }
-        return editor;
+        try {
+            return getPackageManager().getApplicationLabel(
+                    getPackageManager().getApplicationInfo(packageName, 0)).toString();
+        } catch (PackageManager.NameNotFoundException ignored) {
+            return packageName;
+        }
     }
 
-    private LinearLayout.LayoutParams matchWrap() {
-        return new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        Uri uri = data.getData();
+        if (requestCode == REQUEST_EXPORT) {
+            worker.execute(() -> exportTo(uri));
+        } else if (requestCode == REQUEST_IMPORT) {
+            worker.execute(() -> importFrom(uri));
+        }
     }
 
-    private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
+    private void exportTo(Uri uri) {
+        try (OutputStream output = getContentResolver().openOutputStream(uri, "wt")) {
+            if (output == null) throw new IllegalStateException("无法打开目标文件");
+            output.write(BackupCodec.exportJson(preferences).getBytes(StandardCharsets.UTF_8));
+            mainHandler.post(() -> toast("配置已导出"));
+        } catch (Exception error) {
+            mainHandler.post(() -> toast("导出失败：" + error.getMessage()));
+        }
+    }
+
+    private void importFrom(Uri uri) {
+        try (InputStream input = getContentResolver().openInputStream(uri);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            if (input == null) throw new IllegalStateException("无法打开备份文件");
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                if (output.size() + read > 4 * 1024 * 1024) {
+                    throw new IllegalArgumentException("备份文件超过 4 MB");
+                }
+                output.write(buffer, 0, read);
+            }
+            String json = new String(output.toByteArray(), StandardCharsets.UTF_8);
+            new org.json.JSONObject(json);
+            mainHandler.post(() -> new AlertDialog.Builder(this).setTitle("覆盖现有配置？")
+                    .setMessage("导入将完整覆盖当前全局设置、应用规则和模板。")
+                    .setPositiveButton("覆盖导入", (dialog, which) -> worker.execute(() -> {
+                        try {
+                            BackupCodec.importJson(preferences, json);
+                            mainHandler.post(() -> {
+                                toast("配置已导入");
+                                content.removeAllViews();
+                                renderContent();
+                            });
+                        } catch (Exception error) {
+                            mainHandler.post(() -> toast("导入失败：" + error.getMessage()));
+                        }
+                    })).setNegativeButton("取消", null).show());
+        } catch (Exception error) {
+            mainHandler.post(() -> toast("读取失败：" + error.getMessage()));
+        }
+    }
+
+    private void toast(String message) {
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show();
     }
 }

@@ -43,6 +43,8 @@ public final class MainHook extends XposedModule {
             SharedPreferences preferences = getRemotePreferences(PreferenceStorage.GROUP);
             ConfigManager configManager = new ConfigManager(preferences);
             LogUtils.setDebug(configManager.snapshot().debug);
+            new io.github.fairyxh.volumelimiter.hook.SystemServerNewAppMonitor(preferences)
+                    .install(param.getClassLoader());
             new AudioServiceHook(this, configManager).install(param.getClassLoader());
         } catch (Throwable error) {
             LogUtils.error("Fatal initialization error; all hooks skipped", error);

@@ -4,6 +4,7 @@ import android.media.AudioManager;
 
 import java.lang.reflect.Method;
 import java.util.Locale;
+import java.util.function.IntUnaryOperator;
 
 import io.github.fairyxh.volumelimiter.config.ConfigManager;
 import io.github.fairyxh.volumelimiter.utils.LogUtils;
@@ -12,23 +13,55 @@ public final class VolumeAdjustHook {
     private static final int STREAM_ASSISTANT = 11;
     private final ConfigManager configManager;
     private final DeviceRouteHook deviceRouteHook;
-    private final ForegroundAppResolver foregroundAppResolver;
+    private final AudioAppResolver appResolver;
     private Method getStreamMaxVolume;
     private Method getStreamVolume;
     private Method getActiveStreamType;
+    private Method setStreamVolume;
+    private volatile Object audioServiceInstance;
 
     public VolumeAdjustHook(ConfigManager configManager, DeviceRouteHook deviceRouteHook,
-                            ForegroundAppResolver foregroundAppResolver,
+                            AudioAppResolver appResolver,
                             Class<?> audioServiceClass) {
         this.configManager = configManager;
         this.deviceRouteHook = deviceRouteHook;
-        this.foregroundAppResolver = foregroundAppResolver;
+        this.appResolver = appResolver;
         getStreamMaxVolume = findIntMethod(audioServiceClass, "getStreamMaxVolume", 1);
         getStreamVolume = findIntMethod(audioServiceClass, "getStreamVolume", 1);
         getActiveStreamType = findIntMethod(audioServiceClass, "getActiveStreamType", 1);
+        setStreamVolume = findSetStreamVolume(audioServiceClass);
+    }
+
+    public void enforceCurrentLimits() {
+        ConfigManager.Snapshot config = configManager.snapshot();
+        LogUtils.setDebug(config.debug);
+        Object service = audioServiceInstance;
+        if (!config.enabled || service == null) {
+            return;
+        }
+        for (int streamType : new int[]{0, 1, 2, 3, 4, 5, 6, 11}) {
+            try {
+                int current = invokeInt(getStreamVolume, service, streamType, -1);
+                int maximum = calculateMaximum(service, streamType, null, new Object[0]);
+                if (current >= 0 && current > maximum) {
+                    lowerStream(service, streamType, maximum);
+                    LogUtils.debug("ActiveCorrection stream=" + streamType + " current="
+                            + current + " limit=" + maximum + " applied=true");
+                }
+            } catch (Throwable error) {
+                LogUtils.debug("Active volume correction failed stream=" + streamType + ": " + error);
+            }
+        }
+    }
+
+    public void rememberAudioService(Object audioService) {
+        if (audioService != null) {
+            audioServiceInstance = audioService;
+        }
     }
 
     public Object[] clampSetArguments(Object audioService, Method method, Object[] originalArgs) {
+        rememberAudioService(audioService);
         ConfigManager.Snapshot config = configManager.snapshot();
         LogUtils.setDebug(config.debug);
         if (!config.enabled) {
@@ -41,7 +74,7 @@ public final class VolumeAdjustHook {
         }
         int streamType = (Integer) originalArgs[streamPosition];
         Integer explicitDevice = findExplicitDevice(method, originalArgs, indexPosition + 1);
-        int maximum = calculateMaximum(audioService, streamType, explicitDevice);
+        int maximum = calculateMaximum(audioService, streamType, explicitDevice, originalArgs);
         int requested = (Integer) originalArgs[indexPosition];
         if (requested <= maximum) {
             return originalArgs;
@@ -54,6 +87,7 @@ public final class VolumeAdjustHook {
     }
 
     public boolean shouldBlockAdjustment(Object audioService, Method method, Object[] args) {
+        rememberAudioService(audioService);
         ConfigManager.Snapshot config = configManager.snapshot();
         LogUtils.setDebug(config.debug);
         if (!config.enabled) {
@@ -67,7 +101,7 @@ public final class VolumeAdjustHook {
         if (streamType < 0) {
             return false;
         }
-        int maximum = calculateMaximum(audioService, streamType, null);
+        int maximum = calculateMaximum(audioService, streamType, null, args);
         int current = invokeInt(getStreamVolume, audioService, streamType, -1);
         boolean blocked = current >= 0 && current >= maximum;
         if (blocked) {
@@ -77,38 +111,55 @@ public final class VolumeAdjustHook {
         return blocked;
     }
 
-    private int calculateMaximum(Object audioService, int streamType, Integer explicitDevice) {
+    private int calculateMaximum(Object audioService, int streamType, Integer explicitDevice,
+                                 Object[] hookArguments) {
         int systemMaximum = invokeInt(getStreamMaxVolume, audioService, streamType, Integer.MAX_VALUE);
         if (systemMaximum == Integer.MAX_VALUE) {
             return systemMaximum;
         }
         String device = deviceRouteHook.resolve(audioService, streamType, explicitDevice);
-        String foregroundPackage = foregroundAppResolver.resolve();
-        int percent = configManager.snapshot().getEffectivePercent(
-                streamType, device, foregroundPackage);
-        return Math.max(0, (systemMaximum * percent) / 100);
+        AudioAppResolver.Result apps = appResolver.resolve(hookArguments);
+        ConfigManager.Resolution resolution = configManager.snapshot().resolve(
+                streamType, device, apps.candidates);
+        int maximum = calculateLimitedIndex(systemMaximum, resolution.percent);
+        LogUtils.debug("LimitDecision stream=" + streamType + " device=" + device
+                + " directApp=" + apps.directPackage + " focusApp=" + apps.focusPackage
+                + " foregroundApp=" + apps.foregroundPackage
+                + " selectedApp=" + resolution.matchedPackage
+                + " appRuleMatched=" + resolution.appRuleMatched
+                + " percent=" + resolution.percent + " maximum=" + maximum
+                + "/" + systemMaximum);
+        return maximum;
     }
 
     private int resolveAdjustmentStream(Object audioService, Method method, Object[] args,
                                         int directionPosition) {
-        if (method.getName().equals("adjustStreamVolume")) {
-            int streamPosition = findStreamPosition(method, args);
-            return streamPosition >= 0 ? (Integer) args[streamPosition] : -1;
-        }
-        int suggested = findSuggestedStream(args, directionPosition);
-        if (suggested >= 0) {
-            return suggested;
-        }
-        return invokeInt(getActiveStreamType, audioService, suggested, AudioManager.STREAM_MUSIC);
+        return selectAdjustmentStream(method.getName(), args, directionPosition,
+                suggested -> invokeInt(getActiveStreamType, audioService, suggested,
+                        AudioManager.STREAM_MUSIC));
     }
 
-    private static int findSuggestedStream(Object[] args, int directionPosition) {
-        for (int i = directionPosition + 1; i < args.length; i++) {
-            if (args[i] instanceof Integer value && isKnownStream(value)) {
-                return value;
-            }
+    static int selectAdjustmentStream(String methodName, Object[] args, int directionPosition,
+                                      IntUnaryOperator activeStreamResolver) {
+        if (methodName.equals("adjustStreamVolume")) {
+            return args.length > 0 && args[0] instanceof Integer value && isKnownStream(value)
+                    ? value : -1;
         }
-        return -1;
+        int suggestedPosition = directionPosition + 1;
+        if (suggestedPosition >= args.length || !(args[suggestedPosition] instanceof Integer)) {
+            return -1;
+        }
+        int suggested = (Integer) args[suggestedPosition];
+        return isKnownStream(suggested) ? suggested
+                : activeStreamResolver.applyAsInt(suggested);
+    }
+
+    static int calculateLimitedIndex(int systemMaximum, int percent) {
+        if (systemMaximum <= 0 || percent <= 0) {
+            return 0;
+        }
+        long scaled = (long) systemMaximum * Math.min(percent, 100);
+        return (int) Math.min(systemMaximum, Math.max(1L, (scaled + 99L) / 100L));
     }
 
     private static int findStreamPosition(Method method, Object[] args) {
@@ -174,6 +225,51 @@ public final class VolumeAdjustHook {
             }
         }
         return null;
+    }
+
+    private static Method findSetStreamVolume(Class<?> type) {
+        for (Class<?> current = type; current != null; current = current.getSuperclass()) {
+            for (Method method : current.getDeclaredMethods()) {
+                Class<?>[] types = method.getParameterTypes();
+                if ((method.getName().equals("setStreamVolume")
+                        || method.getName().equals("setStreamVolumeWithAttribution"))
+                        && types.length >= 2 && types[0] == int.class && types[1] == int.class) {
+                    try {
+                        method.setAccessible(true);
+                        return method;
+                    } catch (Throwable ignored) {
+                        // Try the next overload.
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private void lowerStream(Object service, int streamType, int limit) {
+        if (setStreamVolume == null) {
+            return;
+        }
+        Class<?>[] types = setStreamVolume.getParameterTypes();
+        Object[] args = new Object[types.length];
+        int integerIndex = 0;
+        for (int i = 0; i < types.length; i++) {
+            if (types[i] == int.class) {
+                args[i] = integerIndex == 0 ? streamType : integerIndex == 1 ? limit : 0;
+                integerIndex++;
+            } else if (types[i] == boolean.class) {
+                args[i] = false;
+            } else if (types[i] == String.class) {
+                args[i] = "io.github.fairyxh.volumelimiter";
+            } else {
+                args[i] = null;
+            }
+        }
+        try {
+            setStreamVolume.invoke(service, args);
+        } catch (Throwable error) {
+            LogUtils.debug("Unable to lower active stream=" + streamType + ": " + error);
+        }
     }
 
     private static int invokeInt(Method method, Object receiver, int argument, int fallback) {
