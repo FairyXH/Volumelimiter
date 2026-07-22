@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Volumelimiter</string>
+    <string name="module_description">限制 Android 系统各音频流与输出设备的最大音量</string>
+</resources>
