@@ -1,3 +1,6 @@
+import java.text.SimpleDateFormat
+import java.util.Date
+
 plugins {
     alias(libs.plugins.agp.app)
 }
@@ -6,13 +9,16 @@ android {
     namespace = "io.github.fairyxh.volumelimiter"
     compileSdk = 36
     buildToolsVersion = "36.1.0"
+    val buildNumber =
+        SimpleDateFormat("yyyyMMddHH").format(Date())
 
     defaultConfig {
         applicationId = "io.github.fairyxh.volumelimiter"
         minSdk = 30
+        //noinspection OldTargetApi
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = buildNumber.toInt()
+        versionName = buildNumber
     }
 
     buildTypes {
