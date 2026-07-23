@@ -49,6 +49,14 @@ android {
     }
 }
 
+tasks.register("printReleaseInfo") {
+    doLast {
+        println("versionCode=${android.defaultConfig.versionCode}")
+        println("versionName=${android.defaultConfig.versionName}")
+        println("发布时Tag应当写：(${android.defaultConfig.versionCode}-${android.defaultConfig.versionName})")
+    }
+}
+
 dependencies {
     compileOnly(libs.libxposed.api)
     implementation(libs.libxposed.service)
