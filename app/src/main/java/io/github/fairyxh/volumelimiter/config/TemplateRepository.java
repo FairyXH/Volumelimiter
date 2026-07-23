@@ -71,28 +71,8 @@ public final class TemplateRepository {
                 .putStringSet(PreferenceStorage.KEY_APP_PACKAGES, configured)
                 .putBoolean(PreferenceStorage.KEY_PER_APP_ENABLED, true);
         for (String packageName : packageNames) {
-            editor.putBoolean(PreferenceStorage.appEnabledKey(packageName), true)
-                    .putInt(PreferenceStorage.appPercentKey(packageName), template.masterPercent);
-            for (PreferenceStorage.StreamEntry entry : PreferenceStorage.STREAMS.values()) {
-                Integer percent = template.streamPercents.get(entry.key);
-                editor.putBoolean(PreferenceStorage.appStreamEnabledKey(packageName, entry.key),
-                        percent != null);
-                if (percent == null) {
-                    editor.remove(PreferenceStorage.appStreamPercentKey(packageName, entry.key));
-                } else {
-                    editor.putInt(PreferenceStorage.appStreamPercentKey(packageName, entry.key), percent);
-                }
-            }
-            for (PreferenceStorage.DeviceEntry entry : PreferenceStorage.DEVICES.values()) {
-                Integer percent = template.devicePercents.get(entry.key);
-                editor.putBoolean(PreferenceStorage.appDeviceEnabledKey(packageName, entry.key),
-                        percent != null);
-                if (percent == null) {
-                    editor.remove(PreferenceStorage.appDevicePercentKey(packageName, entry.key));
-                } else {
-                    editor.putInt(PreferenceStorage.appDevicePercentKey(packageName, entry.key), percent);
-                }
-            }
+            SystemRuleStore.writeRule(editor, packageName,
+                    SystemRuleStore.Rule.fromTemplate(template));
         }
         return editor.commit();
     }

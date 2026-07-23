@@ -26,6 +26,7 @@ public final class VolumeLimiterApp extends Application implements XposedService
         LISTENERS.remove(listener);
     }
 
+
     @Override
     public void onCreate() {
         super.onCreate();

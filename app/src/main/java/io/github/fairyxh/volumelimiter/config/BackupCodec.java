@@ -18,6 +18,11 @@ public final class BackupCodec {
     }
 
     public static String exportJson(SharedPreferences preferences) throws JSONException {
+        return exportJson(preferences, null);
+    }
+
+    public static String exportJson(SharedPreferences preferences, SystemRuleStore systemRuleStore)
+            throws JSONException {
         JSONObject root = new JSONObject();
         root.put("version", VERSION);
         JSONObject global = new JSONObject();
@@ -36,7 +41,7 @@ public final class BackupCodec {
         root.put("global", global);
         root.put("templates", new JSONArray(TemplateRepository.serialize(
                 TemplateRepository.read(preferences))));
-        root.put("applications", exportApplications(preferences));
+        root.put("applications", exportApplications(preferences, systemRuleStore));
         root.put("newAppBehavior", new JSONObject()
                 .put("enabled", preferences.getBoolean(
                         PreferenceStorage.KEY_AUTO_APPLY_NEW_APPS, false))
@@ -48,6 +53,11 @@ public final class BackupCodec {
     }
 
     public static void importJson(SharedPreferences preferences, String json) throws JSONException {
+        importJson(preferences, json, null);
+    }
+
+    public static void importJson(SharedPreferences preferences, String json,
+            SystemRuleStore systemRuleStore) throws JSONException {
         JSONObject root = new JSONObject(json);
         int version = root.getInt("version");
         if (version != VERSION) {
@@ -89,9 +99,13 @@ public final class BackupCodec {
         if (!editor.commit()) {
             throw new JSONException("写入 Remote Preferences 失败");
         }
+        if (systemRuleStore != null && !systemRuleStore.clear()) {
+            throw new JSONException("清理 system_server 规则失败");
+        }
     }
 
-    private static JSONObject exportApplications(SharedPreferences preferences) throws JSONException {
+    private static JSONObject exportApplications(SharedPreferences preferences,
+            SystemRuleStore systemRuleStore) throws JSONException {
         JSONObject applications = new JSONObject();
         for (String packageName : PreferenceStorage.readAppPackages(preferences)) {
             JSONObject rule = new JSONObject();
@@ -118,6 +132,14 @@ public final class BackupCodec {
             rule.put("streams", streams);
             rule.put("devices", devices);
             applications.put(packageName, rule);
+        }
+        if (systemRuleStore != null) {
+            JSONObject overlay = systemRuleStore.exportApplications(preferences);
+            java.util.Iterator<String> keys = overlay.keys();
+            while (keys.hasNext()) {
+                String packageName = keys.next();
+                applications.put(packageName, overlay.getJSONObject(packageName));
+            }
         }
         return applications;
     }

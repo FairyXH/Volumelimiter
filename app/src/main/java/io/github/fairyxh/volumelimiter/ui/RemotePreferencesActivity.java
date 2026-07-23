@@ -12,16 +12,19 @@ import android.widget.TextView;
 
 import io.github.fairyxh.volumelimiter.VolumeLimiterApp;
 import io.github.fairyxh.volumelimiter.config.PreferenceStorage;
+import io.github.fairyxh.volumelimiter.config.SystemRuleStore;
 import io.github.libxposed.service.XposedService;
 
 abstract class RemotePreferencesActivity extends Activity implements VolumeLimiterApp.ServiceListener {
     protected LinearLayout content;
     protected SharedPreferences preferences;
+    protected SystemRuleStore systemRuleStore;
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         ScrollView scroll = new ScrollView(this);
+        systemRuleStore = SystemRuleStore.forModuleRemote(this);
         content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(20), dp(16), dp(20), dp(32));
@@ -47,9 +50,14 @@ abstract class RemotePreferencesActivity extends Activity implements VolumeLimit
         runOnUiThread(() -> {
             preferences = service == null ? null
                     : service.getRemotePreferences(PreferenceStorage.GROUP);
+            if (systemRuleStore == null) {
+                systemRuleStore = SystemRuleStore.forModuleRemote(this);
+            }
             content.removeAllViews();
             if (preferences == null) {
                 showMessage("LSPosed 服务未连接，配置暂不可写入");
+            } else if (systemRuleStore == null) {
+                showMessage("服务无法连接，请确认模块已启用并重启设备");
             } else {
                 renderContent();
             }

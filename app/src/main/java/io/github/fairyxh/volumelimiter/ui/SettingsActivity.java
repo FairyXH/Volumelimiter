@@ -78,9 +78,20 @@ public final class SettingsActivity extends RemotePreferencesActivity {
         super.onCreate(state);
         setTitle("Volumelimiter");
         worker.execute(() -> cachedApps = loadLaunchableApps());
-        String packageName = getIntent().getStringExtra(AppRuleActivity.EXTRA_PACKAGE);
+        openRuleFromIntent(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        openRuleFromIntent(intent);
+    }
+
+    private void openRuleFromIntent(Intent intent) {
+        String packageName = intent.getStringExtra(AppRuleActivity.EXTRA_PACKAGE);
         if (packageName != null && !packageName.isBlank()) {
-            getIntent().removeExtra(AppRuleActivity.EXTRA_PACKAGE);
+            intent.removeExtra(AppRuleActivity.EXTRA_PACKAGE);
             startActivity(new Intent(this, AppRuleActivity.class)
                     .putExtra(AppRuleActivity.EXTRA_PACKAGE, packageName));
         }
@@ -120,7 +131,7 @@ public final class SettingsActivity extends RemotePreferencesActivity {
         addSection("应用规则");
         addSwitch("启用分应用限制", PreferenceStorage.KEY_PER_APP_ENABLED, false, null);
         addBody("识别优先级：音量调用者 > AudioFocus 播放应用 > 前台 Activity。");
-        Set<String> configured = PreferenceStorage.readAppPackages(preferences);
+        Set<String> configured = readAllRulePackages();
         addBody("已配置 " + configured.size() + " 个应用");
         Button manageApps = new Button(this);
         manageApps.setText("搜索、选择与批量应用模板");
@@ -131,22 +142,22 @@ public final class SettingsActivity extends RemotePreferencesActivity {
         configuredRules.setOnClickListener(view -> startActivity(
                 new Intent(this, ConfiguredRulesActivity.class)));
         content.addView(configuredRules, matchWrap());
-        List<String> configuredPreview = new ArrayList<>(configured);
-        configuredPreview.sort(String::compareToIgnoreCase);
-        if (configuredPreview.size() > 20) {
-            configuredPreview = new ArrayList<>(configuredPreview.subList(0, 20));
-        }
-        for (String packageName : configuredPreview) {
-            Button edit = new Button(this);
-            edit.setText(appLabel(packageName) + "\n" + packageName);
-            edit.setOnClickListener(view -> startActivity(new Intent(this, AppRuleActivity.class)
-                    .putExtra(AppRuleActivity.EXTRA_PACKAGE, packageName)));
-            content.addView(edit, matchWrap());
-        }
-        if (configured.size() > configuredPreview.size()) {
-            addBody("其余 " + (configured.size() - configuredPreview.size())
-                    + " 条规则请在应用管理中搜索。");
-        }
+//        List<String> configuredPreview = new ArrayList<>(configured);
+//        configuredPreview.sort(String::compareToIgnoreCase);
+//        if (configuredPreview.size() > 20) {
+//            configuredPreview = new ArrayList<>(configuredPreview.subList(0, 20));
+//        }
+//        for (String packageName : configuredPreview) {
+//            Button edit = new Button(this);
+//            edit.setText(appLabel(packageName) + "\n" + packageName);
+//            edit.setOnClickListener(view -> startActivity(new Intent(this, AppRuleActivity.class)
+//                    .putExtra(AppRuleActivity.EXTRA_PACKAGE, packageName)));
+//            content.addView(edit, matchWrap());
+//        }
+//        if (configured.size() > configuredPreview.size()) {
+//            addBody("其余 " + (configured.size() - configuredPreview.size())
+//                    + " 条规则请在应用管理中搜索。");
+//        }
 
         addSection("音量类别安全上限");
         for (PreferenceStorage.StreamEntry entry : PreferenceStorage.STREAMS.values()) {
@@ -155,7 +166,7 @@ public final class SettingsActivity extends RemotePreferencesActivity {
         }
 
         renderTemplates();
-//        renderNewAppBehavior();
+        renderNewAppBehavior();
         renderBackup();
 
         addSection("高级设置");
@@ -179,6 +190,7 @@ public final class SettingsActivity extends RemotePreferencesActivity {
                 .setMessage("将清除全局设置、应用规则、模板和新应用行为配置。")
                 .setPositiveButton("重置", (dialog, which) -> {
                     if (preferences.edit().clear().commit()) {
+                        systemRuleStore.clear();
                         content.removeAllViews();
                         renderContent();
                     } else {
@@ -219,7 +231,7 @@ public final class SettingsActivity extends RemotePreferencesActivity {
     }
 
     private void renderNewAppBehavior() {
-        addSection("新安装应用行为(弃用)");
+        addSection("新安装应用行为");
         addSwitch("新应用自动套用模板", PreferenceStorage.KEY_AUTO_APPLY_NEW_APPS,
                 false, null);
         List<VolumeTemplate> templates = TemplateRepository.read(preferences);
@@ -389,6 +401,7 @@ public final class SettingsActivity extends RemotePreferencesActivity {
         String[] names = templates.stream().map(template -> template.name).toArray(String[]::new);
         new AlertDialog.Builder(this).setTitle("选择模板").setItems(names, (dialog, which) -> {
             if (TemplateRepository.applyToPackages(preferences, templates.get(which), packages)) {
+                systemRuleStore.removeRules(packages);
                 toast("已为 " + packages.size() + " 个应用应用模板");
                 parent.dismiss();
                 content.removeAllViews();
@@ -483,7 +496,8 @@ public final class SettingsActivity extends RemotePreferencesActivity {
     private void exportTo(Uri uri) {
         try (OutputStream output = getContentResolver().openOutputStream(uri, "wt")) {
             if (output == null) throw new IllegalStateException("无法打开目标文件");
-            output.write(BackupCodec.exportJson(preferences).getBytes(StandardCharsets.UTF_8));
+            output.write(BackupCodec.exportJson(preferences, systemRuleStore)
+                    .getBytes(StandardCharsets.UTF_8));
             mainHandler.post(() -> toast("配置已导出"));
         } catch (Exception error) {
             mainHandler.post(() -> toast("导出失败：" + error.getMessage()));
@@ -508,7 +522,7 @@ public final class SettingsActivity extends RemotePreferencesActivity {
                     .setMessage("导入将完整覆盖当前全局设置、应用规则和模板。")
                     .setPositiveButton("覆盖导入", (dialog, which) -> worker.execute(() -> {
                         try {
-                            BackupCodec.importJson(preferences, json);
+                            BackupCodec.importJson(preferences, json, systemRuleStore);
                             mainHandler.post(() -> {
                                 toast("配置已导入");
                                 content.removeAllViews();
@@ -525,5 +539,11 @@ public final class SettingsActivity extends RemotePreferencesActivity {
 
     private void toast(String message) {
         Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+    }
+
+    private Set<String> readAllRulePackages() {
+        Set<String> packages = PreferenceStorage.readAppPackages(preferences);
+        packages.addAll(systemRuleStore.readPackages());
+        return packages;
     }
 }

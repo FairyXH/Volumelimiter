@@ -21,6 +21,10 @@ public final class AppRuleActivity extends RemotePreferencesActivity {
             showMessage("应用包名无效或应用已卸载");
             return;
         }
+        if (!systemRuleStore.migrateRuleToPreferences(preferences, packageName)) {
+            showMessage("无法加载 system_server 自动规则，请稍后重试");
+            return;
+        }
         String label = packageName;
         try {
             label = getPackageManager().getApplicationLabel(
@@ -69,6 +73,7 @@ public final class AppRuleActivity extends RemotePreferencesActivity {
                     .putStringSet(PreferenceStorage.KEY_APP_PACKAGES, packages);
             PreferenceStorage.removeAppRule(editor, packageName);
             if (editor.commit()) {
+                systemRuleStore.removeRules(Collections.singleton(packageName));
                 finish();
             } else {
                 Toast.makeText(this, "删除应用规则失败", Toast.LENGTH_SHORT).show();

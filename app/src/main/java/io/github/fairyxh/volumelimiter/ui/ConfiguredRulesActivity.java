@@ -108,7 +108,9 @@ public final class ConfiguredRulesActivity extends RemotePreferencesActivity {
         List<RuleEntry> result = new ArrayList<>();
         PackageManager manager = getPackageManager();
         Drawable fallback = getDrawable(android.R.drawable.sym_def_app_icon);
-        for (String packageName : PreferenceStorage.readAppPackages(preferences)) {
+        Set<String> packages = PreferenceStorage.readAppPackages(preferences);
+        packages.addAll(systemRuleStore.readPackages());
+        for (String packageName : packages) {
             String label = packageName;
             Drawable icon = fallback;
             try {
@@ -151,7 +153,9 @@ public final class ConfiguredRulesActivity extends RemotePreferencesActivity {
             PreferenceStorage.removeAppRule(editor, packageName);
         }
         editor.putStringSet(PreferenceStorage.KEY_APP_PACKAGES, packages);
-        if (editor.commit()) {
+        boolean remoteSaved = editor.commit();
+        boolean overlaySaved = remoteSaved && systemRuleStore.removeRules(selected);
+        if (remoteSaved && overlaySaved) {
             selected.clear();
             refresh();
         } else {

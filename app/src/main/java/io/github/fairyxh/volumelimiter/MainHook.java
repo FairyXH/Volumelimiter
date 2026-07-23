@@ -6,7 +6,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.github.fairyxh.volumelimiter.config.ConfigManager;
 import io.github.fairyxh.volumelimiter.config.PreferenceStorage;
+import io.github.fairyxh.volumelimiter.config.SystemRuleStore;
 import io.github.fairyxh.volumelimiter.hook.AudioServiceHook;
+import io.github.fairyxh.volumelimiter.hook.SystemServerNewAppMonitor;
 import io.github.fairyxh.volumelimiter.utils.AndroidVersionUtils;
 import io.github.fairyxh.volumelimiter.utils.LogUtils;
 import io.github.libxposed.api.XposedModule;
@@ -39,15 +41,36 @@ public final class MainHook extends XposedModule {
             LogUtils.error("Framework does not advertise remote preferences capability", null);
             return;
         }
+        SharedPreferences preferences;
         try {
-            SharedPreferences preferences = getRemotePreferences(PreferenceStorage.GROUP);
-            ConfigManager configManager = new ConfigManager(preferences);
+            preferences = getRemotePreferences(PreferenceStorage.GROUP);
+        } catch (Throwable error) {
+            LogUtils.error("[VLM][Config] Load failed reason=remote preferences unavailable", error);
+            return;
+        }
+
+        SystemRuleStore systemRuleStore = SystemRuleStore.forSystemServer();
+        ConfigManager configManager;
+        try {
+            configManager = new ConfigManager(preferences, systemRuleStore);
             LogUtils.setDebug(configManager.snapshot().debug);
-            new io.github.fairyxh.volumelimiter.hook.SystemServerNewAppMonitor(preferences)
+        } catch (Throwable error) {
+            LogUtils.error("[VLM][Config] Load failed reason=" + error, error);
+            return;
+        }
+
+        try {
+            new SystemServerNewAppMonitor(this, preferences, systemRuleStore,
+                    configManager::refresh)
                     .install(param.getClassLoader());
+        } catch (Throwable error) {
+            LogUtils.error("System-server new-app monitor installation failed", error);
+        }
+
+        try {
             new AudioServiceHook(this, configManager).install(param.getClassLoader());
         } catch (Throwable error) {
-            LogUtils.error("Fatal initialization error; all hooks skipped", error);
+            LogUtils.error("AudioServiceHook installation failed", error);
         }
     }
 }

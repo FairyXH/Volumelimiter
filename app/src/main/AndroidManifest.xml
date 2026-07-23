@@ -2,6 +2,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <permission
+        android:name="io.github.fairyxh.volumelimiter.permission.SYSTEM_CONFIG"
+        android:protectionLevel="signature" />
+
+    <uses-permission android:name="io.github.fairyxh.volumelimiter.permission.SYSTEM_CONFIG" />
+
+
     <uses-permission
         android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
@@ -21,6 +28,7 @@
         android:supportsRtl="true"
         android:theme="@style/AppTheme"
         tools:ignore="MissingApplicationIcon">
+
 
         <activity
             android:name=".ui.SettingsActivity"
