@@ -7,6 +7,7 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.media.AudioManager;
 import android.net.Uri;
 
 import android.os.Bundle;
@@ -118,6 +119,26 @@ public final class SettingsActivity extends RemotePreferencesActivity {
     protected void renderContent() {
         addTitle("音量限制");
         addBody("限制系统最大音量");
+
+        addSection("当前音量");
+        AudioManager audioManager = getSystemService(AudioManager.class);
+        if (audioManager != null) {
+            for (PreferenceStorage.StreamEntry entry : PreferenceStorage.STREAMS.values()) {
+                int current = audioManager.getStreamVolume(entry.streamType);
+                int max = audioManager.getStreamMaxVolume(entry.streamType);
+                int percent = max > 0 ? Math.round(current * 100f / max) : 0;
+                addBody(entry.label + "：" + current + " / " + max + "（" + percent + "%）");
+            }
+        } else {
+            addBody("AudioManager 不可用");
+        }
+        Button refreshVolume = new Button(this);
+        refreshVolume.setText("刷新当前音量");
+        refreshVolume.setOnClickListener(view -> {
+            content.removeAllViews();
+            renderContent();
+        });
+        content.addView(refreshVolume, matchWrap());
 
         addSection("总配置");
         addLimiter("启用音量限制", PreferenceStorage.KEY_ENABLED,

@@ -3,7 +3,9 @@ package io.github.fairyxh.volumelimiter.hook;
 import android.media.AudioManager;
 
 import java.lang.reflect.Method;
+import java.util.HashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.function.IntUnaryOperator;
 
 import io.github.fairyxh.volumelimiter.config.ConfigManager;
@@ -19,6 +21,7 @@ public final class VolumeAdjustHook {
     private Method getActiveStreamType;
     private Method setStreamVolume;
     private volatile Object audioServiceInstance;
+    private final Map<Integer, Integer> lastLoweredLimit = new HashMap<>();
 
     public VolumeAdjustHook(ConfigManager configManager, DeviceRouteHook deviceRouteHook,
                             AudioAppResolver appResolver,
@@ -43,10 +46,18 @@ public final class VolumeAdjustHook {
             try {
                 int current = invokeInt(getStreamVolume, service, streamType, -1);
                 int maximum = calculateMaximum(service, streamType, null, new Object[0]);
+                Integer last = lastLoweredLimit.get(streamType);
                 if (current >= 0 && current > maximum) {
-                    lowerStream(service, streamType, maximum);
-                    LogUtils.debug("ActiveCorrection stream=" + streamType + " current="
-                            + current + " limit=" + maximum + " applied=true");
+                    // Only lower when the limit changes so the 100ms correction loop
+                    // does not call setStreamVolume forever.
+                    if (last == null || last != maximum) {
+                        lowerStream(service, streamType, maximum);
+                        lastLoweredLimit.put(streamType, maximum);
+                        LogUtils.debug("ActiveCorrection stream=" + streamType + " current="
+                                + current + " limit=" + maximum + " applied=true");
+                    }
+                } else {
+                    lastLoweredLimit.remove(streamType);
                 }
             } catch (Throwable error) {
                 LogUtils.debug("Active volume correction failed stream=" + streamType + ": " + error);

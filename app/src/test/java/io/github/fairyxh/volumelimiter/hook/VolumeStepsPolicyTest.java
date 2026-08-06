@@ -27,4 +27,18 @@ public final class VolumeStepsPolicyTest {
         assertEquals(99, VolumeStepsHook.customMaxIndex(100));
         assertEquals(99, VolumeStepsHook.customMaxIndex(200));
     }
+
+    @Test
+    public void validIndexIsClampedToUserSpace() {
+        // 50 阶：内部索引允许到 49
+        assertEquals(0, VolumeStepsHook.clampValidIndex(0, 50));
+        assertEquals(49, VolumeStepsHook.clampValidIndex(49, 50));
+        assertEquals(49, VolumeStepsHook.clampValidIndex(200, 50));
+        assertEquals(0, VolumeStepsHook.clampValidIndex(-5, 50));
+    }
+
+    @Test
+    public void validIndexPassesThroughWhenStepsUnset() {
+        assertEquals(15, VolumeStepsHook.clampValidIndex(15, 0));
+    }
 }

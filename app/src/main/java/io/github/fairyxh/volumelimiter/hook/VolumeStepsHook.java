@@ -1,7 +1,5 @@
 package io.github.fairyxh.volumelimiter.hook;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 
@@ -12,12 +10,14 @@ import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
 
 /**
- * Replaces the system volume step count with a user-specified value.
+ * 虚拟音量阶数：把 AudioService 内部音量索引重新标定为 0..N-1（N 阶）。
  *
- * <p>音量阶数 = 用户输入 N，对应的最大音量索引为 N-1（至少 1）。每个 Hook 独立安装并
- * fail-open：未配置阶数时原样放行，不影响现有的音量限制 Hook。
+ * <p>核心是 hook VolumeStreamState.getValidIndex —— setIndex 内部用它对索引做上限钳制。
+ * 让它允许到 N-1 后，内部存储、显示、音量键步进全部处于用户空间：50 阶时每按一次
+ * 音量键前进 1 用户档（2%），按 50 次从 0% 到 100%。不修改 mIndexMax（final 字段），
+ * 不改 native 上限；真实档位少于用户阶数时，native 声音按真实档位跳变，属硬件限制。
  */
-public final class  VolumeStepsHook {
+public final class VolumeStepsHook {
     private final XposedModule module;
     private final ConfigManager configManager;
 
@@ -31,7 +31,6 @@ public final class  VolumeStepsHook {
         installed += hookAudioSystem(classLoader);
         installed += hookAudioService(audioServiceClass);
         installed += hookVolumeStreamState(audioServiceClass);
-        installed += hookVolumeStreamStateConstructors(audioServiceClass);
         if (installed > 0) {
             LogUtils.info("Installed " + installed + " volume-steps hooks");
         }
@@ -86,14 +85,18 @@ public final class  VolumeStepsHook {
         }
         int installed = 0;
         for (Method method : stateClass.getDeclaredMethods()) {
-            if (!method.getName().equals("getMaxIndex")
-                    || method.getReturnType() != int.class) {
+            if (method.getReturnType() != int.class) {
                 continue;
             }
-            if (method.getParameterCount() == 0
+            if (method.getName().equals("getMaxIndex")
+                    && (method.getParameterCount() == 0
                     || (method.getParameterCount() == 1
-                    && method.getParameterTypes()[0] == int.class)) {
+                    && method.getParameterTypes()[0] == int.class))) {
                 installed += hookReplaceMax(method, "VolumeStreamState.getMaxIndex");
+            } else if (method.getName().equals("getValidIndex")
+                    && method.getParameterCount() == 1
+                    && method.getParameterTypes()[0] == int.class) {
+                installed += hookClampValidIndex(method);
             }
         }
         return installed;
@@ -108,58 +111,6 @@ public final class  VolumeStepsHook {
             }
         }
         return null;
-    }
-
-    /**
-     * Syncs the internal {@code mIndexMax} so the constructor result matches the custom step
-     * count. {@code AudioSystem.getMaxVolumeIndex} is native and cannot be hooked reliably by
-     * the YAHFA backend, which used to leave {@code mIndexMax} at the system default while the
-     * public {@code getMaxIndex()}/{@code getStreamMaxVolume()} hooks reported the custom value.
-     * That mismatch made volume keys stop at the real system maximum after setting a custom
-     * step count.
-     */
-    private int hookVolumeStreamStateConstructors(Class<?> audioServiceClass) {
-        Class<?> stateClass = findVolumeStreamState(audioServiceClass);
-        if (stateClass == null) {
-            return 0;
-        }
-        int installed = 0;
-        for (Constructor<?> constructor : stateClass.getDeclaredConstructors()) {
-            try {
-                constructor.setAccessible(true);
-                module.hook(constructor)
-                        .setPriority(XposedInterface.PRIORITY_LOWEST)
-                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                        .intercept(chain -> {
-                            Object result = chain.proceed();
-                            ConfigManager.Snapshot config = configManager.snapshot();
-                            if (config.volumeSteps >= PreferenceStorage.MIN_VOLUME_STEPS) {
-                                syncMaxIndex(chain.getThisObject(), stateClass,
-                                        customMaxIndex(config.volumeSteps) + 1);
-                            }
-                            return result;
-                        });
-                installed++;
-            } catch (Throwable error) {
-                LogUtils.debug("VolumeSteps unable to hook VolumeStreamState constructor "
-                        + constructor + ": " + error);
-            }
-        }
-        if (installed > 0) {
-            LogUtils.info("VolumeSteps synced " + installed + " VolumeStreamState constructors");
-        }
-        return installed;
-    }
-
-    private static void syncMaxIndex(Object streamState, Class<?> stateClass, int maxIndex) {
-        try {
-            Field field = stateClass.getDeclaredField("mIndexMax");
-            field.setAccessible(true);
-            field.setInt(streamState, maxIndex);
-            LogUtils.debug("VolumeSteps set mIndexMax=" + maxIndex);
-        } catch (Throwable error) {
-            LogUtils.debug("VolumeSteps unable to sync mIndexMax: " + error);
-        }
     }
 
     private int hookReplaceMax(Method method, String label) {
@@ -209,11 +160,44 @@ public final class  VolumeStepsHook {
         }
     }
 
-    /** 用户阶数 N 对应的系统最大索引（0 基）；未配置时返回 -1。 */
+    private int hookClampValidIndex(Method method) {
+        try {
+            method.setAccessible(true);
+            module.hook(method)
+                    .setPriority(XposedInterface.PRIORITY_HIGHEST)
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(chain -> {
+                        ConfigManager.Snapshot config = configManager.snapshot();
+                        if (config.volumeSteps < PreferenceStorage.MIN_VOLUME_STEPS) {
+                            return chain.proceed();
+                        }
+                        Object[] args = chain.getArgs().toArray();
+                        if (args.length > 0 && args[0] instanceof Integer index) {
+                            return clampValidIndex(index, config.volumeSteps);
+                        }
+                        return chain.proceed();
+                    });
+            LogUtils.debug("VolumeSteps hooked VolumeStreamState.getValidIndex");
+            return 1;
+        } catch (Throwable error) {
+            LogUtils.debug("VolumeSteps unable to hook VolumeStreamState.getValidIndex: " + error);
+            return 0;
+        }
+    }
+
+    /** 用户阶数 N 对应的显示最大索引（0 基）；未配置时返回 -1。 */
     static int customMaxIndex(int steps) {
         if (steps < PreferenceStorage.MIN_VOLUME_STEPS) {
             return -1;
         }
         return Math.max(1, Math.min(steps, PreferenceStorage.MAX_VOLUME_STEPS) - 1);
+    }
+
+    /** 内部索引钳制到 0..N-1；未配置阶数时原样返回。 */
+    static int clampValidIndex(int index, int steps) {
+        if (steps < PreferenceStorage.MIN_VOLUME_STEPS) {
+            return index;
+        }
+        return Math.max(0, Math.min(index, customMaxIndex(steps)));
     }
 }
