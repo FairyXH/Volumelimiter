@@ -50,7 +50,7 @@ public final class ConfigManagerPolicyTest {
 
     @Test
     public void missingAppRuleFallsBackToDeviceAndGlobalStreamSafetyLimit() {
-        ConfigManager.Snapshot snapshot = new ConfigManager.Snapshot(true, false, 80, true,
+        ConfigManager.Snapshot snapshot = new ConfigManager.Snapshot(true, false, 0, 80, true,
                 Map.of(3, 45), Map.of("speaker", 70), Map.of());
 
         ConfigManager.Resolution result = snapshot.resolve(3, "speaker",
@@ -62,7 +62,7 @@ public final class ConfigManagerPolicyTest {
 
     @Test
     public void deviceOverrideAppliesWithoutStreamOrAppRule() {
-        ConfigManager.Snapshot snapshot = new ConfigManager.Snapshot(true, false, 80, true,
+        ConfigManager.Snapshot snapshot = new ConfigManager.Snapshot(true, false, 0, 80, true,
                 Map.of(), Map.of("speaker", 55), Map.of());
 
         ConfigManager.Resolution result = snapshot.resolve(3, "speaker",
@@ -73,7 +73,7 @@ public final class ConfigManagerPolicyTest {
     }
 
     private static ConfigManager.Snapshot snapshot(Map<String, ConfigManager.AppRule> rules) {
-        return new ConfigManager.Snapshot(true, false, 90, true,
+        return new ConfigManager.Snapshot(true, false, 0, 90, true,
                 Map.of(), Map.of(), rules);
     }
 }

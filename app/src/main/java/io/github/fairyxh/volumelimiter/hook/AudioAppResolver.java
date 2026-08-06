@@ -34,9 +34,9 @@ public final class AudioAppResolver {
         String focus = focusTracker.resolve();
         String foreground = foregroundResolver.resolve();
         List<String> candidates = new ArrayList<>(3);
+        addUnique(candidates, foreground);
         addUnique(candidates, direct);
         addUnique(candidates, focus);
-        addUnique(candidates, foreground);
         return new Result(direct, focus, foreground,
                 Collections.unmodifiableList(candidates));
     }

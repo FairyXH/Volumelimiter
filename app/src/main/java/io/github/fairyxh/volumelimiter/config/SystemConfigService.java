@@ -26,6 +26,7 @@ public final class SystemConfigService {
     public static final String EXTRA_ERROR = "error";
     public static final String OPERATION_READ = "read";
     public static final String OPERATION_REPLACE = "replace";
+    public static final String OPERATION_LIST_PACKAGES = "list_packages";
     public static final int RESULT_SUCCESS = 1;
     public static final int RESULT_FAILURE = 2;
 
@@ -46,7 +47,7 @@ public final class SystemConfigService {
             IntentFilter filter = new IntentFilter(ACTION_REQUEST);
             BroadcastReceiver receiver = new BroadcastReceiver() {
                 @Override
-                public void onReceive(Context ignored, Intent intent) {
+                public void onReceive(Context context, Intent intent) {
                     int sendingUid = resolveSendingUid(this);
                     if (sendingUid > 0 && sendingUid != uid) {
                         LogUtils.error("[VLM][Config] Rejected config request from uid="
@@ -55,7 +56,7 @@ public final class SystemConfigService {
                         setResultData("caller rejected");
                         return;
                     }
-                    handleRequest(store, intent, this);
+                    handleRequest(context, store, intent, this);
                 }
             };
             if (Build.VERSION.SDK_INT >= 33) {
@@ -72,7 +73,7 @@ public final class SystemConfigService {
         }
     }
 
-    private static void handleRequest(SystemRuleStore store, Intent intent,
+    private static void handleRequest(Context context, SystemRuleStore store, Intent intent,
             BroadcastReceiver receiver) {
         try {
             String operation = intent == null ? null : intent.getStringExtra(EXTRA_OPERATION);
@@ -87,12 +88,40 @@ public final class SystemConfigService {
                 receiver.setResultData(null);
                 return;
             }
+            if (OPERATION_LIST_PACKAGES.equals(operation)) {
+                receiver.setResultCode(RESULT_SUCCESS);
+                receiver.setResultData(listPackages(context));
+                return;
+            }
             throw new IllegalArgumentException("unsupported operation");
         } catch (Throwable error) {
             receiver.setResultCode(RESULT_FAILURE);
             receiver.setResultData(error.getClass().getSimpleName() + ": " + error.getMessage());
             LogUtils.error("[VLM][Config] Config request failed", error);
         }
+    }
+
+    /**
+     * Enumerates every installed application from system_server's PackageManager so the module UI
+     * is not affected by HideMyAppList or other package-visibility restrictions in the app process.
+     */
+    private static String listPackages(Context context) throws org.json.JSONException {
+        PackageManager packageManager = context == null ? null : context.getPackageManager();
+        if (packageManager == null) {
+            throw new IllegalStateException("PackageManager is unavailable");
+        }
+        org.json.JSONArray packages = new org.json.JSONArray();
+        for (android.content.pm.ApplicationInfo info
+                : packageManager.getInstalledApplications(0)) {
+            if (MODULE_PACKAGE.equals(info.packageName)) {
+                continue;
+            }
+            CharSequence label = packageManager.getApplicationLabel(info);
+            packages.put(new org.json.JSONObject()
+                    .put("packageName", info.packageName)
+                    .put("label", label == null ? info.packageName : label.toString()));
+        }
+        return new org.json.JSONObject().put("packages", packages).toString();
     }
 
     private static int resolveSendingUid(BroadcastReceiver receiver) {

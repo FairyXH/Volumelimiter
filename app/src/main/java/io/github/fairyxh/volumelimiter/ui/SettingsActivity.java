@@ -43,6 +43,7 @@ import java.util.concurrent.Executors;
 
 import io.github.fairyxh.volumelimiter.config.BackupCodec;
 import io.github.fairyxh.volumelimiter.config.PreferenceStorage;
+import io.github.fairyxh.volumelimiter.config.SystemRuleStore;
 import io.github.fairyxh.volumelimiter.config.TemplateRepository;
 import io.github.fairyxh.volumelimiter.config.VolumeTemplate;
 import io.github.fairyxh.volumelimiter.utils.AndroidVersionUtils;
@@ -122,6 +123,66 @@ public final class SettingsActivity extends RemotePreferencesActivity {
         addLimiter("启用音量限制", PreferenceStorage.KEY_ENABLED,
                 PreferenceStorage.KEY_MASTER_PERCENT, "所有设备和应用的默认上限");
 
+        addSection("音量阶数");
+        addBody("设置音量滑块的总档位数，例如 30 表示 0-29 共 30 档。留空或输入 0 使用系统默认值；修改后建议重启系统让内部音量上限完全生效。");
+        EditText stepsInput = new EditText(this);
+        stepsInput.setHint("留空使用系统默认");
+        stepsInput.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        stepsInput.setSingleLine(true);
+        int steps = PreferenceStorage.readVolumeSteps(preferences);
+        stepsInput.setText(steps > 0 ? String.valueOf(steps) : "");
+        content.addView(stepsInput, matchWrap());
+        LinearLayout stepsRow = new LinearLayout(this);
+        Button saveSteps = new Button(this);
+        saveSteps.setText("保存音量阶数");
+        saveSteps.setOnClickListener(view -> {
+            int parsed;
+            String text = stepsInput.getText().toString().trim();
+            if (text.isEmpty()) {
+                parsed = 0;
+            } else {
+                try {
+                    parsed = Integer.parseInt(text);
+                } catch (NumberFormatException error) {
+                    toast("请输入 0-" + PreferenceStorage.MAX_VOLUME_STEPS
+                            + " 之间的整数");
+                    return;
+                }
+            }
+            if (parsed < 0 || parsed > PreferenceStorage.MAX_VOLUME_STEPS) {
+                toast("请输入 0-" + PreferenceStorage.MAX_VOLUME_STEPS
+                        + " 之间的整数");
+                return;
+            }
+            SharedPreferences.Editor editor = preferences.edit();
+            if (parsed == 0) {
+                editor.remove(PreferenceStorage.KEY_VOLUME_STEPS);
+            } else {
+                editor.putInt(PreferenceStorage.KEY_VOLUME_STEPS, parsed);
+            }
+            if (editor.commit()) {
+                toast(parsed == 0 ? "已恢复系统默认阶数"
+                        : "音量阶数已保存为 " + parsed);
+            } else {
+                toast("保存失败");
+            }
+        });
+        stepsRow.addView(saveSteps, new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        Button restoreSteps = new Button(this);
+        restoreSteps.setText("恢复默认阶数");
+        restoreSteps.setOnClickListener(view -> {
+            if (preferences.edit().remove(PreferenceStorage.KEY_VOLUME_STEPS).commit()) {
+                stepsInput.setText("");
+                toast("已恢复系统默认阶数");
+            } else {
+                toast("操作失败");
+            }
+        });
+        stepsRow.addView(restoreSteps, new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        content.addView(stepsRow, matchWrap());
+
         addSection("输出设备覆盖");
         for (PreferenceStorage.DeviceEntry entry : PreferenceStorage.DEVICES.values()) {
             addLimiter(entry.label, PreferenceStorage.deviceEnabledKey(entry.key),
@@ -130,7 +191,7 @@ public final class SettingsActivity extends RemotePreferencesActivity {
 
         addSection("应用规则");
         addSwitch("启用分应用限制", PreferenceStorage.KEY_PER_APP_ENABLED, false, null);
-        addBody("识别优先级：音量调用者 > AudioFocus 播放应用 > 前台 Activity。");
+        addBody("识别优先级：前台 Activity > 音量调用者 > AudioFocus 播放应用。");
         Set<String> configured = readAllRulePackages();
         addBody("已配置 " + configured.size() + " 个应用");
         Button manageApps = new Button(this);
@@ -412,6 +473,17 @@ public final class SettingsActivity extends RemotePreferencesActivity {
 
 
     private List<AppEntry> loadLaunchableApps() {
+        List<SystemRuleStore.PackageEntry> bridgePackages = systemRuleStore.listPackages();
+        if (!bridgePackages.isEmpty()) {
+            List<AppEntry> result = new ArrayList<>();
+            for (SystemRuleStore.PackageEntry entry : bridgePackages) {
+                result.add(new AppEntry(entry.packageName, entry.label));
+            }
+            Collator collator = Collator.getInstance(Locale.getDefault());
+            result.sort(Comparator.comparing(entry -> entry.label, collator));
+            return List.copyOf(result);
+        }
+        // Fallback: the app-process PackageManager may be restricted by HideMyAppList.
         List<ApplicationInfo> installed = getPackageManager().getInstalledApplications(0);
         List<AppEntry> result = new ArrayList<>();
         for (ApplicationInfo info : installed) {

@@ -9,6 +9,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.util.AtomicFile;
 
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -18,10 +19,12 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
@@ -179,6 +182,49 @@ public final class SystemRuleStore {
         }
         Map<String, Rule> rules = parseRules(document);
         writeRules(rules);
+    }
+
+    public static final class PackageEntry {
+        public final String packageName;
+        public final String label;
+
+        PackageEntry(String packageName, String label) {
+            this.packageName = packageName;
+            this.label = label;
+        }
+    }
+
+    public List<PackageEntry> listPackages() {
+        if (remoteContext == null) {
+            return Collections.emptyList();
+        }
+        try {
+            String document = sendRemoteRequest(SystemConfigService.OPERATION_LIST_PACKAGES, null);
+            return parsePackageList(document);
+        } catch (Throwable ignored) {
+            return Collections.emptyList();
+        }
+    }
+
+    private static List<PackageEntry> parsePackageList(String document) throws JSONException {
+        List<PackageEntry> result = new ArrayList<>();
+        if (document == null || document.isBlank()) {
+            return result;
+        }
+        JSONObject root = new JSONObject(document);
+        JSONArray packages = root.optJSONArray("packages");
+        if (packages == null) {
+            return result;
+        }
+        for (int i = 0; i < packages.length(); i++) {
+            JSONObject entry = packages.getJSONObject(i);
+            String packageName = entry.optString("packageName");
+            String label = entry.optString("label", packageName);
+            if (packageName != null && !packageName.isBlank()) {
+                result.add(new PackageEntry(packageName, label));
+            }
+        }
+        return result;
     }
 
     public Set<String> readPackages() {

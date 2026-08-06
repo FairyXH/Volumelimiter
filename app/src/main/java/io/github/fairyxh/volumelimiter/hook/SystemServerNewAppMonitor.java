@@ -19,6 +19,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 
 import java.lang.reflect.Method;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -161,6 +162,35 @@ public final class SystemServerNewAppMonitor {
                 context.registerReceiver(packageReceiver, packageFilter, null, registrationWorker);
             }
             LogUtils.info(LOG_PREFIX + "PACKAGE_ADDED receiver registered");
+
+            IntentFilter removedFilter = new IntentFilter(Intent.ACTION_PACKAGE_REMOVED);
+            removedFilter.addDataScheme("package");
+            BroadcastReceiver removedReceiver = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context ignored, Intent intent) {
+                    Uri data = intent.getData();
+                    if (intent.getBooleanExtra(Intent.EXTRA_REPLACING, false) || data == null) {
+                        return;
+                    }
+                    String packageName = data.getSchemeSpecificPart();
+                    LogUtils.info(LOG_PREFIX + "Package removed: " + packageName);
+                    registrationWorker.post(() -> {
+                        if (systemRuleStore.removeRules(Collections.singleton(packageName))) {
+                            configurationChanged.run();
+                        }
+                        LogUtils.info(LOG_PREFIX
+                                + "Removed stale overlay rule for uninstalled package: "
+                                + packageName);
+                    });
+                }
+            };
+            if (Build.VERSION.SDK_INT >= 33) {
+                context.registerReceiver(removedReceiver, removedFilter, null, registrationWorker,
+                        Context.RECEIVER_EXPORTED);
+            } else {
+                context.registerReceiver(removedReceiver, removedFilter, null, registrationWorker);
+            }
+            LogUtils.info(LOG_PREFIX + "PACKAGE_REMOVED receiver registered");
         } catch (Throwable error) {
             LogUtils.error(LOG_PREFIX + "Register failed\nreason: " + error, error);
         }

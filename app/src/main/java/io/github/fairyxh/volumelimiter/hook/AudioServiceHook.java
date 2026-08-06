@@ -42,6 +42,7 @@ public final class AudioServiceHook {
                 focusTracker, new ForegroundAppResolver(classLoader));
         VolumeAdjustHook limiter = new VolumeAdjustHook(
                 configManager, routeHook, appResolver, audioServiceClass);
+        new VolumeStepsHook(module, configManager).install(classLoader, audioServiceClass);
         HandlerThread correctionThread = new HandlerThread("Volumelimiter-correction");
         correctionThread.start();
         Handler correctionHandler = new Handler(correctionThread.getLooper());

@@ -6,6 +6,9 @@ import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.graphics.drawable.Drawable;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
@@ -17,11 +20,17 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import io.github.fairyxh.volumelimiter.config.PreferenceStorage;
+import io.github.fairyxh.volumelimiter.config.SystemRuleStore;
+import io.github.libxposed.service.XposedService;
 
 public final class ConfiguredRulesActivity extends RemotePreferencesActivity {
     private static final class RuleEntry {
@@ -37,6 +46,86 @@ public final class ConfiguredRulesActivity extends RemotePreferencesActivity {
     }
 
     private final Set<String> selected = new HashSet<>();
+    private final Set<String> migratedPackages = new HashSet<>();
+    private final Set<String> hiddenPackages = new HashSet<>();
+    private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final Map<String, String> labelCache = new HashMap<>();
+    private volatile boolean deleting;
+
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        worker.execute(() -> {
+            List<SystemRuleStore.PackageEntry> entries = systemRuleStore.listPackages();
+            mainHandler.post(() -> {
+                labelCache.clear();
+                for (SystemRuleStore.PackageEntry entry : entries) {
+                    labelCache.put(entry.packageName, entry.label);
+                }
+                if (preferences != null && !labelCache.isEmpty()) {
+                    pruneUninstalledRules(labelCache.keySet());
+                }
+                if (preferences != null) {
+                    content.removeAllViews();
+                    renderContent();
+                }
+            });
+        });
+    }
+
+    @Override
+    public void onServiceChanged(XposedService service) {
+        super.onServiceChanged(service);
+        runOnUiThread(() -> {
+            if (preferences != null) {
+                worker.execute(() -> {
+                    migrateOverlayRules();
+                    mainHandler.post(() -> {
+                        if (preferences != null) {
+                            content.removeAllViews();
+                            renderContent();
+                        }
+                    });
+                });
+            }
+        });
+    }
+
+    private void migrateOverlayRules() {
+        Set<String> overlay = systemRuleStore.readPackages();
+        for (String packageName : overlay) {
+            if (migratedPackages.add(packageName)) {
+                systemRuleStore.migrateRuleToPreferences(preferences, packageName);
+            }
+        }
+    }
+
+    private void pruneUninstalledRules(Set<String> installedPackages) {
+        Set<String> packages = PreferenceStorage.readAppPackages(preferences);
+        Set<String> uninstalled = new HashSet<>();
+        for (String packageName : packages) {
+            if (!installedPackages.contains(packageName)) {
+                uninstalled.add(packageName);
+            }
+        }
+        if (uninstalled.isEmpty()) {
+            return;
+        }
+        SharedPreferences.Editor editor = preferences.edit();
+        for (String packageName : uninstalled) {
+            packages.remove(packageName);
+            PreferenceStorage.removeAppRule(editor, packageName);
+        }
+        editor.putStringSet(PreferenceStorage.KEY_APP_PACKAGES, packages);
+        editor.commit();
+    }
+
+    @Override
+    protected void onDestroy() {
+        worker.shutdownNow();
+        super.onDestroy();
+    }
 
     @Override
     protected void renderContent() {
@@ -57,16 +146,16 @@ public final class ConfiguredRulesActivity extends RemotePreferencesActivity {
                 CheckBox check = new CheckBox(ConfiguredRulesActivity.this);
                 RuleEntry entry = getItem(position);
                 check.setText(entry.label + "\n" + entry.packageName);
+                check.setOnCheckedChangeListener((button, checked) -> {
+                    if (checked) selected.add(entry.packageName);
+                    else selected.remove(entry.packageName);
+                });
                 check.setChecked(selected.contains(entry.packageName));
                 Drawable icon = entry.icon;
                 int size = dp(40);
                 icon.setBounds(0, 0, size, size);
                 check.setCompoundDrawables(icon, null, null, null);
                 check.setCompoundDrawablePadding(dp(10));
-                check.setOnCheckedChangeListener((button, checked) -> {
-                    if (checked) selected.add(entry.packageName);
-                    else selected.remove(entry.packageName);
-                });
                 row.addView(check, new LinearLayout.LayoutParams(0,
                         LinearLayout.LayoutParams.WRAP_CONTENT, 1));
                 Button edit = new Button(ConfiguredRulesActivity.this);
@@ -109,16 +198,22 @@ public final class ConfiguredRulesActivity extends RemotePreferencesActivity {
         PackageManager manager = getPackageManager();
         Drawable fallback = getDrawable(android.R.drawable.sym_def_app_icon);
         Set<String> packages = PreferenceStorage.readAppPackages(preferences);
-        packages.addAll(systemRuleStore.readPackages());
+        Set<String> overlay = systemRuleStore.readPackages();
+        overlay.removeAll(hiddenPackages);
+        packages.addAll(overlay);
         for (String packageName : packages) {
-            String label = packageName;
+            String label = labelCache.get(packageName);
             Drawable icon = fallback;
             try {
                 ApplicationInfo info = manager.getApplicationInfo(packageName, 0);
-                label = manager.getApplicationLabel(info).toString();
                 icon = manager.getApplicationIcon(info);
+                if (label == null) {
+                    label = manager.getApplicationLabel(info).toString();
+                }
             } catch (PackageManager.NameNotFoundException ignored) {
-                // Keep package name and default icon for uninstalled applications.
+                if (label == null) {
+                    label = packageName;
+                }
             }
             result.add(new RuleEntry(packageName, label, icon));
         }
@@ -146,21 +241,51 @@ public final class ConfiguredRulesActivity extends RemotePreferencesActivity {
     }
 
     private void deleteSelected() {
+        if (deleting || selected.isEmpty()) {
+            return;
+        }
+        Set<String> toDelete = new HashSet<>(selected);
+        deleting = true;
+        worker.execute(() -> {
+            boolean success;
+            String message;
+            try {
+                for (String packageName : toDelete) {
+                    if (migratedPackages.add(packageName)) {
+                        systemRuleStore.migrateRuleToPreferences(preferences, packageName);
+                    }
+                }
+                boolean prefsSaved = removeFromPreferences(toDelete);
+                systemRuleStore.removeRules(toDelete);
+                success = prefsSaved;
+                message = success ? "已删除 " + toDelete.size() + " 条规则" : "删除规则失败";
+            } catch (Throwable error) {
+                success = false;
+                message = "删除规则失败：" + error;
+            }
+            final boolean deleted = success;
+            final String text = message;
+            mainHandler.post(() -> {
+                deleting = false;
+                if (deleted) {
+                    selected.removeAll(toDelete);
+                    hiddenPackages.addAll(toDelete);
+                }
+                Toast.makeText(this, text, Toast.LENGTH_SHORT).show();
+                refresh();
+            });
+        });
+    }
+
+    private boolean removeFromPreferences(Set<String> packageNames) {
         Set<String> packages = PreferenceStorage.readAppPackages(preferences);
         SharedPreferences.Editor editor = preferences.edit();
-        for (String packageName : selected) {
+        for (String packageName : packageNames) {
             packages.remove(packageName);
             PreferenceStorage.removeAppRule(editor, packageName);
         }
         editor.putStringSet(PreferenceStorage.KEY_APP_PACKAGES, packages);
-        boolean remoteSaved = editor.commit();
-        boolean overlaySaved = remoteSaved && systemRuleStore.removeRules(selected);
-        if (remoteSaved && overlaySaved) {
-            selected.clear();
-            refresh();
-        } else {
-            Toast.makeText(this, "删除规则失败", Toast.LENGTH_SHORT).show();
-        }
+        return editor.commit();
     }
 
     private void refresh() {
