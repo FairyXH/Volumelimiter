@@ -27,6 +27,7 @@ public final class VolumeAdjustHook {
     private final VolumeIndexMapper mapper;
     private final ClassLoader classLoader;
     private Method getStreamVolume;
+    private Method getStreamMaxVolume;
     private Method getActiveStreamType;
     private Method setStreamVolume;
     private volatile Object audioServiceInstance;
@@ -41,6 +42,7 @@ public final class VolumeAdjustHook {
         this.mapper = mapper;
         this.classLoader = classLoader;
         getStreamVolume = findIntMethod(audioServiceClass, "getStreamVolume", 1);
+        getStreamMaxVolume = findIntMethod(audioServiceClass, "getStreamMaxVolume", 1);
         getActiveStreamType = findIntMethod(audioServiceClass, "getActiveStreamType", 1);
         setStreamVolume = findSetStreamVolume(audioServiceClass);
     }
@@ -140,7 +142,8 @@ public final class VolumeAdjustHook {
                                  Object[] hookArguments) {
         ConfigManager.Snapshot config = configManager.snapshot();
         // 限制在真实空间决策：native 最大值缓存缺失时 fail-open（不限制）。
-        int systemMaximum = VolumeIndexMapper.readNativeMax(classLoader, streamType, mapper);
+        int systemMaximum = VolumeIndexMapper.readNativeMax(classLoader, audioService,
+                getStreamMaxVolume, streamType, mapper);
         if (systemMaximum < 0) {
             return Integer.MAX_VALUE;
         }

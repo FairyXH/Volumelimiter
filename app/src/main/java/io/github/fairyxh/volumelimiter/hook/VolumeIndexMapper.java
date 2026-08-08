@@ -78,6 +78,37 @@ public final class VolumeIndexMapper {
     }
 
     /**
+     * 读取真实 native 最大值并缓存，优先使用 AudioService.getStreamMaxVolume
+     * 实例方法（Oplus/ColorOS 上 AudioSystem.getMaxVolumeIndex 反射可能不可用）。
+     * 失败时返回 -1。
+     */
+    static int readNativeMax(ClassLoader classLoader, Object audioService,
+                             Method getStreamMaxVolume, int streamType,
+                             VolumeIndexMapper mapper) {
+        if (mapper.nativeMaxIndex(streamType) > 0) {
+            return mapper.nativeMaxIndex(streamType);
+        }
+        if (audioService != null && getStreamMaxVolume != null) {
+            try {
+                Object result = getStreamMaxVolume.invoke(audioService, streamType);
+                if (result instanceof Integer value && value > 0) {
+                    mapper.rememberNativeMax(streamType, value);
+                    return value;
+                }
+            } catch (Throwable error) {
+                LogUtils.info("VolumeMapper nativeMax via getStreamMaxVolume failed stream="
+                        + streamType + ": " + error);
+            }
+        }
+        int fallback = readNativeMax(classLoader, streamType, mapper);
+        if (fallback < 0) {
+            LogUtils.info("VolumeMapper nativeMax unknown stream=" + streamType
+                    + " (getStreamMaxVolume=" + (getStreamMaxVolume != null) + ")");
+        }
+        return fallback;
+    }
+
+    /**
      * 反射读取 AudioSystem.getMaxVolumeIndex 真实值（不 hook native 方法）；
      * 读取成功时顺便缓存到指定 mapper。失败返回 -1。
      */

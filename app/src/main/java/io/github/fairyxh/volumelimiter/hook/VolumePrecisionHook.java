@@ -33,6 +33,7 @@ public final class VolumePrecisionHook {
     private final VolumeIndexMapper mapper;
     private ClassLoader classLoader;
     private Method getStreamVolume;
+    private Method getStreamMaxVolume;
     private Method getActiveStreamType;
     private Method setStreamVolume;
 
@@ -46,6 +47,7 @@ public final class VolumePrecisionHook {
     public int install(ClassLoader classLoader, Class<?> audioServiceClass) {
         this.classLoader = classLoader;
         getStreamVolume = findIntMethod(audioServiceClass, "getStreamVolume", 1);
+        getStreamMaxVolume = findIntMethod(audioServiceClass, "getStreamMaxVolume", 1);
         getActiveStreamType = findIntMethod(audioServiceClass, "getActiveStreamType", 1);
         setStreamVolume = findSetStreamVolume(audioServiceClass);
         int installed = 0;
@@ -110,7 +112,7 @@ public final class VolumePrecisionHook {
                                     + method.getName() + " -> passthrough");
                             return chain.proceed();
                         }
-                        ensureNativeMax(stream);
+                        ensureNativeMax(chain.getThisObject(), stream);
                         int step = mapper.adjustStep(stream, config.adjustPrecision);
                         if (step < 0) {
                             LogUtils.info("PrecisionHook: nativeMax unknown stream=" + stream
@@ -124,7 +126,8 @@ public final class VolumePrecisionHook {
                         int target = direction > 0
                                 ? current + step : current - step;
                         int nativeLimit = mapper.nativeLimit(stream, config.masterPercent());
-                        if (nativeLimit >= 0) {
+                        // 上限只作用于提高方向；降低方向永不截断（只允许降到 >= 0）
+                        if (direction > 0 && nativeLimit >= 0) {
                             target = Math.min(target, nativeLimit);
                         }
                         target = Math.max(0, target);
@@ -211,9 +214,13 @@ public final class VolumePrecisionHook {
         }
     }
 
-    /** 反射读取 AudioSystem.getMaxVolumeIndex 真实值并缓存（不 hook native 方法）。 */
-    private void ensureNativeMax(int stream) {
-        VolumeIndexMapper.readNativeMax(classLoader, stream, mapper);
+    /**
+     * 反射读取真实 native 最大值并缓存：优先 AudioService.getStreamMaxVolume，
+     * AudioSystem.getMaxVolumeIndex 仅作兜底（不 hook native 方法）。
+     */
+    private void ensureNativeMax(Object audioService, int stream) {
+        VolumeIndexMapper.readNativeMax(classLoader, audioService, getStreamMaxVolume,
+                stream, mapper);
     }
 
     private static int findDirectionPosition(Method method, Object[] args) {
