@@ -104,4 +104,20 @@ public final class VolumeIndexMapper {
         long scaled = (long) systemMaximum * Math.min(percent, 100);
         return (int) Math.min(systemMaximum, Math.max(1L, (scaled + 99L) / 100L));
     }
+
+    /**
+     * 配置变化后的音量重算：保持当前真实音量在旧限制中的比例，映射到新限制。
+     * 例如 real=75（oldLimit=75）→ newLimit=150 时结果为 150。
+     * oldLimit 未知（<=0）时保持原值；newLimit=0 时归零。
+     */
+    public static int rescaleForConfig(int realIndex, int oldLimit, int newLimit) {
+        if (oldLimit <= 0 || newLimit < 0) {
+            return realIndex;
+        }
+        if (newLimit == 0) {
+            return 0;
+        }
+        long scaled = Math.round((double) realIndex * newLimit / oldLimit);
+        return (int) Math.max(0L, Math.min(newLimit, scaled));
+    }
 }
