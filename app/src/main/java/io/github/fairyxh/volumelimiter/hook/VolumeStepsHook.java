@@ -15,14 +15,22 @@ import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
 
 /**
- * 虚拟音量阶数：AudioService 内部仍使用真实 native 索引，仅在边界做
+ * 虚拟音量阶数：AudioService 内部仍使用真实 native 索引，仅在公开边界做
  * “虚拟空间（0..N-1，UI/音量键）” 与 “真实空间（0..nativeLimit，AudioFlinger）”
- * 之间的转换，由 {@link VolumeIndexMapper} 负责。
+ * 之间的转换，由 {@link VolumeIndexMapper} 负责，本类不维护任何音量状态。
  *
- * <p>链路：getStreamVolume 返回虚拟索引；setStreamVolume 把虚拟索引转回真实索引；
- * 音量键 adjust 按“虚拟 +1” 计算目标后再转真实并校正；VolumeStreamState.getValidIndex
- * 仍保留（限制在虚拟范围，设置真实值时先经 mapper 再转回），但不再破坏真实索引。
- * 不修改 mIndexMax（final 字段），不改 native 上限，不改 Audio HAL。
+ * <p>链路：getStreamMaxVolume 返回 virtualSteps-1（显示最大值，不含限制）；
+ * getStreamVolume 把真实索引映射为虚拟索引；setStreamVolume 先把请求钳制到
+ * 虚拟空间上限（0..virtualLimit），再转回真实索引；adjustStreamVolume 按
+ * “虚拟 +1/-1” 计算目标后转真实并校正。配置变化不需要同步：用户下一次
+ * 调整音量时按新配置映射即可。
+ *
+ * <p>限制同时发生在两个空间：虚拟空间由 {@link #clampVirtualIndex(int, int, int)}
+ * 在 set/adjust 入口执行（例如 50 阶 + 60% → 最大虚拟索引 29）；真实空间由
+ * VolumeAdjustHook 按 nativeLimit 兜底。
+ *
+ * <p>不修改 mIndexMax（final 字段），不改 native 上限，不改 Audio HAL；不 hook
+ * AudioSystem.getMaxVolumeIndex（native 最大值仅反射读取并缓存）。
  */
 public final class VolumeStepsHook {
     /** AudioManager.STREAM_ASSISTANT 是 @hide 常量，公共 SDK 不可直接引用。 */
@@ -55,7 +63,6 @@ public final class VolumeStepsHook {
         getActiveStreamType = findIntMethod(audioServiceClass, "getActiveStreamType", 1);
         setStreamVolume = findSetStreamVolume(audioServiceClass);
         int installed = 0;
-        installed += hookAudioSystem(classLoader);
         installed += hookAudioService(audioServiceClass);
         installed += hookVolumeStreamState(audioServiceClass);
         installed += hookSetAndAdjust(audioServiceClass);
@@ -66,55 +73,6 @@ public final class VolumeStepsHook {
             LogUtils.info("Installed " + installed + " volume-steps hooks");
         }
         return installed;
-    }
-
-    private int hookAudioSystem(ClassLoader classLoader) {
-        Class<?> type;
-        try {
-            type = Class.forName("android.media.AudioSystem", false, classLoader);
-        } catch (Throwable error) {
-            LogUtils.debug("VolumeSteps: AudioSystem unavailable: " + error);
-            return 0;
-        }
-        int installed = 0;
-        for (Method method : type.getDeclaredMethods()) {
-            if (Modifier.isStatic(method.getModifiers())
-                    && method.getName().equals("getMaxVolumeIndex")
-                    && method.getParameterCount() == 1
-                    && method.getParameterTypes()[0] == int.class
-                    && method.getReturnType() == int.class) {
-                installed += hookNativeMaxCache(method);
-            }
-        }
-        return installed;
-    }
-
-    /**
-     * AudioSystem.getMaxVolumeIndex 是 native 范围来源。hook 只缓存真实最大值，
-     * 返回值保持真实值 —— 若改成虚拟值会破坏 VolumeStreamState 内部初始化。
-     */
-    private int hookNativeMaxCache(Method method) {
-        try {
-            method.setAccessible(true);
-            module.hook(method)
-                    .setPriority(XposedInterface.PRIORITY_HIGHEST)
-                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                    .intercept(chain -> {
-                        Object[] args = chain.getArgs().toArray();
-                        int stream = args.length > 0 && args[0] instanceof Integer
-                                ? (Integer) args[0] : -1;
-                        Object original = chain.proceed();
-                        if (stream >= 0 && original instanceof Integer value) {
-                            mapper.rememberNativeMax(stream, value);
-                        }
-                        return original;
-                    });
-            LogUtils.debug("VolumeSteps hooked AudioSystem.getMaxVolumeIndex (native max cache)");
-            return 1;
-        } catch (Throwable error) {
-            LogUtils.debug("VolumeSteps unable to hook AudioSystem.getMaxVolumeIndex: " + error);
-            return 0;
-        }
     }
 
     private int hookAudioService(Class<?> audioServiceClass) {
@@ -151,11 +109,9 @@ public final class VolumeStepsHook {
                     && (method.getParameterCount() == 0
                     || (method.getParameterCount() == 1
                     && method.getParameterTypes()[0] == int.class))) {
-                installed += hookReplaceMax(method, "VolumeStreamState.getMaxIndex");
-            } else if (method.getName().equals("getValidIndex")
-                    && method.getParameterCount() >= 1
-                    && method.getParameterTypes()[0] == int.class) {
-                installed += hookClampValidIndex(method);
+                // 保留 hook 但直通原值：adjustStreamVolume 内部用 getMaxIndex
+                // 对真实索引做 clamp，改返回虚拟值会破坏内部状态机。
+                installed += hookPassThroughMax(method, "VolumeStreamState.getMaxIndex");
             }
         }
         return installed;
@@ -190,8 +146,8 @@ public final class VolumeStepsHook {
     }
 
     /**
-     * 最大索引 getter 只影响 UI/API 显示：返回用户空间的 customMaxIndex。
-     * 真实 native 最大值通过 {@link #ensureNativeMax(int)} 反射读取并缓存。
+     * getStreamMaxVolume：返回用户空间的 customMaxIndex（virtualSteps-1）。
+     * 不返回限制后的阶数——限制由虚拟空间上限与真实空间上限共同表达。
      */
     private int hookReplaceMax(Method method, String label) {
         try {
@@ -215,6 +171,22 @@ public final class VolumeStepsHook {
                         return customMaxIndex(config.volumeSteps);
                     });
             LogUtils.debug("VolumeSteps hooked " + label);
+            return 1;
+        } catch (Throwable error) {
+            LogUtils.debug("VolumeSteps unable to hook " + label + ": " + error);
+            return 0;
+        }
+    }
+
+    /** VolumeStreamState.getMaxIndex：直通真实值，避免破坏内部索引 clamp。 */
+    private int hookPassThroughMax(Method method, String label) {
+        try {
+            method.setAccessible(true);
+            module.hook(method)
+                    .setPriority(XposedInterface.PRIORITY_HIGHEST)
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .intercept(chain -> chain.proceed());
+            LogUtils.debug("VolumeSteps hooked " + label + " (pass-through real max)");
             return 1;
         } catch (Throwable error) {
             LogUtils.debug("VolumeSteps unable to hook " + label + ": " + error);
@@ -258,8 +230,9 @@ public final class VolumeStepsHook {
     }
 
     /**
-     * setStreamVolume：调用方传入虚拟索引，转换为真实 native 索引后再进入原方法。
-     * 优先级 LOWEST，位于 VolumeAdjustHook 的限制钳制之后。
+     * setStreamVolume：调用方传入虚拟索引，先钳制到虚拟空间上限，再转换为
+     * 真实 native 索引后进入原方法。优先级 LOWEST，位于 VolumeAdjustHook 的
+     * 真实空间钳制之后。
      */
     private int hookSetStreamVolume(Method method) {
         try {
@@ -283,12 +256,15 @@ public final class VolumeStepsHook {
                         int virtualIndex = (Integer) args[indexPosition];
                         ensureNativeMax(stream);
                         logMapperInitialized(stream, config);
-                        int nativeIndex = mapper.virtualToNative(stream, virtualIndex,
+                        int clamped = clampVirtualIndex(virtualIndex, config.volumeSteps,
+                                config.masterPercent());
+                        int nativeIndex = mapper.virtualToNative(stream, clamped,
                                 config.volumeSteps, config.masterPercent());
                         int nativeLimit = mapper.nativeLimit(stream, config.volumeSteps,
                                 config.masterPercent());
-                        LogUtils.debug("VolumeMapper: stream=" + stream + " virtual=" + virtualIndex
-                                + " native=" + nativeIndex + " limit=" + config.masterPercent()
+                        LogUtils.debug("VolumeMapper: stream=" + stream + " requestedVirtual="
+                                + virtualIndex + " clampedVirtual=" + clamped + " native="
+                                + nativeIndex + " limit=" + config.masterPercent()
                                 + " nativeLimit=" + nativeLimit);
                         Object[] changed = args.clone();
                         changed[indexPosition] = nativeIndex;
@@ -303,9 +279,9 @@ public final class VolumeStepsHook {
     }
 
     /**
-     * 音量键：不允许按 native 步进（每次真实索引 +1）。改为按虚拟空间计算
-     * “虚拟 +1 / -1” 的目标索引，转真实后校正回 AudioService。
-     * 优先级 LOWEST：VolumeAdjustHook 已在 HIGHEST 完成上限 block。
+     * 音量键：按虚拟空间计算“虚拟 +1 / -1”的目标索引，钳制到虚拟空间上限后
+     * 转真实并校正回 AudioService。优先级 LOWEST：VolumeAdjustHook 已在
+     * HIGHEST 完成真实空间上限 block。
      */
     private int hookAdjustStreamVolume(Method method) {
         try {
@@ -342,19 +318,25 @@ public final class VolumeStepsHook {
                         }
                         int oldReal = mapper.virtualToNative(stream, oldDisplay,
                                 config.volumeSteps, config.masterPercent());
-                        int targetDisplay = clampValidIndex(oldDisplay
-                                + (direction > 0 ? 1 : -1), config.volumeSteps);
+                        int targetDisplay = clampVirtualIndex(oldDisplay
+                                + (direction > 0 ? 1 : -1), config.volumeSteps,
+                                config.masterPercent());
                         int targetReal = mapper.virtualToNative(stream, targetDisplay,
                                 config.volumeSteps, config.masterPercent());
                         int nativeLimit = mapper.nativeLimit(stream, config.volumeSteps,
                                 config.masterPercent());
-                        // 真实档位比用户阶数粗时，纯映射可能原地踏步：强制真实索引至少移动 1 档。
-                        if (direction > 0 && targetReal <= oldReal && nativeLimit > oldReal) {
+                        // 真实档位比用户阶数粗时，纯映射可能原地踏步：仅当确实想
+                        // 提高/降低时强制真实索引至少移动 1 档；到达虚拟上限后不再移动。
+                        if (direction > 0 && targetDisplay > oldDisplay
+                                && targetReal <= oldReal && nativeLimit > oldReal) {
                             targetReal = Math.min(nativeLimit, oldReal + 1);
-                        } else if (direction < 0 && targetReal >= oldReal) {
+                        } else if (direction < 0 && targetDisplay < oldDisplay
+                                && targetReal >= oldReal) {
                             targetReal = Math.max(0, oldReal - 1);
                         }
-                        int newDisplay = mapper.nativeToVirtual(stream, targetReal,
+                        int newDisplay = clampVirtualIndex(
+                                mapper.nativeToVirtual(stream, targetReal,
+                                        config.volumeSteps, config.masterPercent()),
                                 config.volumeSteps, config.masterPercent());
                         LogUtils.debug("VolumeSteps adjust stream=" + stream
                                 + " virtual=" + oldDisplay + " -> " + newDisplay
@@ -367,45 +349,6 @@ public final class VolumeStepsHook {
             return 1;
         } catch (Throwable error) {
             LogUtils.debug("VolumeSteps unable to hook " + method.getName() + ": " + error);
-            return 0;
-        }
-    }
-
-    /**
-     * getValidIndex：仍限制在虚拟范围，但“设置真实值时先经过 mapper”：
-     * 真实 → 虚拟 → clamp 到 0..N-1 → 真实。数学上等价于 clamp 到
-     * 0..nativeLimit，因此不会破坏真实索引，native 仍能收到完整映射后的值。
-     */
-    private int hookClampValidIndex(Method method) {
-        try {
-            method.setAccessible(true);
-            module.hook(method)
-                    .setPriority(XposedInterface.PRIORITY_HIGHEST)
-                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
-                    .intercept(chain -> {
-                        ConfigManager.Snapshot config = configManager.snapshot();
-                        if (config.volumeSteps < PreferenceStorage.MIN_VOLUME_STEPS) {
-                            return chain.proceed();
-                        }
-                        Object[] args = chain.getArgs().toArray();
-                        if (args.length == 0 || !(args[0] instanceof Integer index)) {
-                            return chain.proceed();
-                        }
-                        int stream = readStreamType(chain.getThisObject());
-                        if (stream < 0) {
-                            return chain.proceed();
-                        }
-                        ensureNativeMax(stream);
-                        int virtual = mapper.nativeToVirtual(stream, index,
-                                config.volumeSteps, config.masterPercent());
-                        int clamped = clampValidIndex(virtual, config.volumeSteps);
-                        return mapper.virtualToNative(stream, clamped,
-                                config.volumeSteps, config.masterPercent());
-                    });
-            LogUtils.debug("VolumeSteps hooked VolumeStreamState.getValidIndex");
-            return 1;
-        } catch (Throwable error) {
-            LogUtils.debug("VolumeSteps unable to hook VolumeStreamState.getValidIndex: " + error);
             return 0;
         }
     }
@@ -468,7 +411,7 @@ public final class VolumeStepsHook {
         }
     }
 
-    /** 反射读取 AudioSystem.getMaxVolumeIndex 真实值；native 方法本身不可 hook 时作为兜底。 */
+    /** 反射读取 AudioSystem.getMaxVolumeIndex 真实值并缓存（不 hook native 方法）。 */
     private void ensureNativeMax(int stream) {
         if (mapper.nativeMaxIndex(stream) > 0) {
             return;
@@ -511,12 +454,28 @@ public final class VolumeStepsHook {
         return Math.max(1, Math.min(steps, PreferenceStorage.MAX_VOLUME_STEPS) - 1);
     }
 
-    /** 虚拟空间钳制到 0..N-1；未配置阶数时原样返回。 */
+    /** 虚拟空间基本钳制到 0..N-1；未配置阶数时原样返回。 */
     static int clampValidIndex(int index, int steps) {
         if (steps < PreferenceStorage.MIN_VOLUME_STEPS) {
             return index;
         }
         return Math.max(0, Math.min(index, customMaxIndex(steps)));
+    }
+
+    /**
+     * 虚拟空间上限钳制：0..round(virtualMaxIndex * percent / 100)。
+     * 例如 50 阶 + 60% → 最大 29，之后音量键保持 29。
+     * 未配置阶数时原样返回（恢复系统默认）。
+     */
+    static int clampVirtualIndex(int index, int steps, int percent) {
+        if (steps < PreferenceStorage.MIN_VOLUME_STEPS) {
+            return index;
+        }
+        int limit = VolumeIndexMapper.virtualLimitIndex(steps, percent);
+        if (limit < 0) {
+            return clampValidIndex(index, steps);
+        }
+        return Math.max(0, Math.min(index, limit));
     }
 
     private static int findDirectionPosition(Method method, Object[] args) {

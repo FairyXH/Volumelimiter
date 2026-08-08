@@ -6,20 +6,25 @@ import java.util.concurrent.ConcurrentHashMap;
 import io.github.fairyxh.volumelimiter.config.PreferenceStorage;
 
 /**
- * 虚拟音量阶数映射器：负责“用户虚拟音量空间”和“Android 真实音量空间”之间的转换。
+ * 虚拟音量阶数映射器：只负责“用户虚拟音量空间”和“Android 真实音量空间”之间的转换，
+ * 不做任何状态同步或配置变化重投影。
  *
  * <p>用户空间：0..N-1（N 阶，例如 50 阶 → 0..49），仅用于 UI 显示和音量键步进。
- * 真实空间：0..nativeMaxIndex（例如 0..150），是 AudioService 内部 / AudioFlinger
+ * 真实空间：0..nativeMaxIndex（例如 0..160），是 AudioService 内部 / AudioFlinger
  * 实际使用的索引。最大音量百分比通过真实上限 nativeLimit 表达：
  *
  * <pre>
  * nativeLimit = nativeMaxIndex * maxVolumePercent / 100
  * </pre>
  *
- * 最终映射为 virtual 0..N-1 ↔ native 0..nativeLimit，因此“满格”（N-1）恰好对应
+ * <p>最终映射为 virtual 0..N-1 ↔ native 0..nativeLimit，因此“满格”（N-1）恰好对应
  * maxVolumePercent 的真实音量（例如 50 阶 + 50% 限制 + nativeMax=150 →
  * virtual 49 ↔ native 75）。映射为线性近似；项目未引入音量曲线表时优先保证
  * 逻辑正确与跨版本兼容。
+ *
+ * <p>虚拟空间的最大允许索引（例如 60% 限制下 virtual 49 → 29）由
+ * {@link #virtualLimitIndex(int, int)} 计算，由调用方（VolumeStepsHook）在 set/adjust
+ * 入口执行；本类只提供计算，不改变映射公式本身。
  */
 public final class VolumeIndexMapper {
     /** 每个音频流缓存的真实 native 最大索引（AudioSystem.getMaxVolumeIndex 原值）。 */
@@ -46,6 +51,19 @@ public final class VolumeIndexMapper {
     /** 用户空间最大索引（0 基），未配置时返回 -1。 */
     public int virtualMaxIndex(int steps) {
         return VolumeStepsHook.customMaxIndex(steps);
+    }
+
+    /**
+     * 虚拟空间最大允许索引：round(virtualMaxIndex * percent / 100)，钳制在 0..virtualMaxIndex。
+     * 例如 50 阶 + 60% → round(49 * 0.6) = 29。阶数未激活时返回 -1。
+     */
+    public int virtualLimitIndex(int steps, int percent) {
+        int vMax = virtualMaxIndex(steps);
+        if (!isActive(steps) || vMax <= 0) {
+            return -1;
+        }
+        long allowed = Math.round((double) vMax * clampPercent(percent) / 100.0);
+        return (int) Math.max(0L, Math.min(vMax, allowed));
     }
 
     /**
@@ -105,19 +123,7 @@ public final class VolumeIndexMapper {
         return (int) Math.min(systemMaximum, Math.max(1L, (scaled + 99L) / 100L));
     }
 
-    /**
-     * 配置变化后的音量重算：保持当前真实音量在旧限制中的比例，映射到新限制。
-     * 例如 real=75（oldLimit=75）→ newLimit=150 时结果为 150。
-     * oldLimit 未知（<=0）时保持原值；newLimit=0 时归零。
-     */
-    public static int rescaleForConfig(int realIndex, int oldLimit, int newLimit) {
-        if (oldLimit <= 0 || newLimit < 0) {
-            return realIndex;
-        }
-        if (newLimit == 0) {
-            return 0;
-        }
-        long scaled = Math.round((double) realIndex * newLimit / oldLimit);
-        return (int) Math.max(0L, Math.min(newLimit, scaled));
+    private static int clampPercent(int percent) {
+        return Math.max(0, Math.min(100, percent));
     }
 }
