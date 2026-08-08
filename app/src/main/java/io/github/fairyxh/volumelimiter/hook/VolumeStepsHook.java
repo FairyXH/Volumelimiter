@@ -19,15 +19,16 @@ import io.github.libxposed.api.XposedModule;
  * “虚拟空间（0..N-1，UI/音量键）” 与 “真实空间（0..nativeLimit，AudioFlinger）”
  * 之间的转换，由 {@link VolumeIndexMapper} 负责，本类不维护任何音量状态。
  *
- * <p>链路：getStreamMaxVolume 返回 virtualSteps-1（显示最大值，不含限制）；
- * getStreamVolume 把真实索引映射为虚拟索引；setStreamVolume 先把请求钳制到
- * 虚拟空间上限（0..virtualLimit），再转回真实索引；adjustStreamVolume 按
- * “虚拟 +1/-1” 计算目标后转真实并校正。配置变化不需要同步：用户下一次
- * 调整音量时按新配置映射即可。
+ * <p>链路：getStreamMaxVolume 返回 virtualSteps-1（显示最大值，与限制无关）；
+ * getStreamVolume 把真实索引映射为虚拟索引；setStreamVolume 把请求钳制到
+ * 0..virtualSteps-1 后转回真实索引；adjustStreamVolume 按“虚拟 +1/-1”计算
+ * 目标后转真实并校正。配置变化不需要同步：用户下一次调整音量时按新配置
+ * 映射即可。
  *
- * <p>限制同时发生在两个空间：虚拟空间由 {@link #clampVirtualIndex(int, int, int)}
- * 在 set/adjust 入口执行（例如 50 阶 + 60% → 最大虚拟索引 29）；真实空间由
- * VolumeAdjustHook 按 nativeLimit 兜底。
+ * <p>virtualSteps 只决定分辨率，不决定最大音量。真实空间上限永远是
+ * nativeLimitIndex = nativeMaxIndex * masterPercent / 100；因此无论 50 阶
+ * 还是 100 阶，满格虚拟索引都映射到同一个 nativeLimitIndex。真实空间限制
+ * 由 VolumeAdjustHook 按 nativeLimit 兜底。
  *
  * <p>不修改 mIndexMax（final 字段），不改 native 上限，不改 Audio HAL；不 hook
  * AudioSystem.getMaxVolumeIndex（native 最大值仅反射读取并缓存）。
@@ -147,7 +148,7 @@ public final class VolumeStepsHook {
 
     /**
      * getStreamMaxVolume：返回用户空间的 customMaxIndex（virtualSteps-1）。
-     * 不返回限制后的阶数——限制由虚拟空间上限与真实空间上限共同表达。
+     * 只反映显示阶数，不参与限制；限制完全由真实空间 nativeLimitIndex 表达。
      */
     private int hookReplaceMax(Method method, String label) {
         try {
@@ -230,9 +231,10 @@ public final class VolumeStepsHook {
     }
 
     /**
-     * setStreamVolume：调用方传入虚拟索引，先钳制到虚拟空间上限，再转换为
-     * 真实 native 索引后进入原方法。优先级 LOWEST，位于 VolumeAdjustHook 的
-     * 真实空间钳制之后。
+     * setStreamVolume：调用方传入虚拟索引，钳制到用户空间 0..virtualSteps-1，
+     * 再转换为真实 native 索引后进入原方法。映射公式保证满格虚拟索引恰好
+     * 等于 nativeLimitIndex，因此 virtualSteps 不会改变真实最大音量。
+     * 优先级 LOWEST，位于 VolumeAdjustHook 的真实空间钳制之后。
      */
     private int hookSetStreamVolume(Method method) {
         try {
@@ -256,8 +258,7 @@ public final class VolumeStepsHook {
                         int virtualIndex = (Integer) args[indexPosition];
                         ensureNativeMax(stream);
                         logMapperInitialized(stream, config);
-                        int clamped = clampVirtualIndex(virtualIndex, config.volumeSteps,
-                                config.masterPercent());
+                        int clamped = clampValidIndex(virtualIndex, config.volumeSteps);
                         int nativeIndex = mapper.virtualToNative(stream, clamped,
                                 config.volumeSteps, config.masterPercent());
                         int nativeLimit = mapper.nativeLimit(stream, config.volumeSteps,
@@ -279,9 +280,10 @@ public final class VolumeStepsHook {
     }
 
     /**
-     * 音量键：按虚拟空间计算“虚拟 +1 / -1”的目标索引，钳制到虚拟空间上限后
-     * 转真实并校正回 AudioService。优先级 LOWEST：VolumeAdjustHook 已在
-     * HIGHEST 完成真实空间上限 block。
+     * 音量键：按虚拟空间计算“虚拟 +1 / -1”的目标索引，钳制到用户空间
+     * 0..virtualSteps-1 后转真实并校正回 AudioService。映射公式保证满格
+     * 虚拟索引 = nativeLimitIndex；达到满格后继续按保持原值。
+     * 优先级 LOWEST：VolumeAdjustHook 已在 HIGHEST 完成真实空间上限 block。
      */
     private int hookAdjustStreamVolume(Method method) {
         try {
@@ -318,15 +320,14 @@ public final class VolumeStepsHook {
                         }
                         int oldReal = mapper.virtualToNative(stream, oldDisplay,
                                 config.volumeSteps, config.masterPercent());
-                        int targetDisplay = clampVirtualIndex(oldDisplay
-                                + (direction > 0 ? 1 : -1), config.volumeSteps,
-                                config.masterPercent());
+                        int targetDisplay = clampValidIndex(oldDisplay
+                                + (direction > 0 ? 1 : -1), config.volumeSteps);
                         int targetReal = mapper.virtualToNative(stream, targetDisplay,
                                 config.volumeSteps, config.masterPercent());
                         int nativeLimit = mapper.nativeLimit(stream, config.volumeSteps,
                                 config.masterPercent());
                         // 真实档位比用户阶数粗时，纯映射可能原地踏步：仅当确实想
-                        // 提高/降低时强制真实索引至少移动 1 档；到达虚拟上限后不再移动。
+                        // 提高/降低时强制真实索引至少移动 1 档；到达满格后不再移动。
                         if (direction > 0 && targetDisplay > oldDisplay
                                 && targetReal <= oldReal && nativeLimit > oldReal) {
                             targetReal = Math.min(nativeLimit, oldReal + 1);
@@ -334,10 +335,10 @@ public final class VolumeStepsHook {
                                 && targetReal >= oldReal) {
                             targetReal = Math.max(0, oldReal - 1);
                         }
-                        int newDisplay = clampVirtualIndex(
+                        int newDisplay = clampValidIndex(
                                 mapper.nativeToVirtual(stream, targetReal,
                                         config.volumeSteps, config.masterPercent()),
-                                config.volumeSteps, config.masterPercent());
+                                config.volumeSteps);
                         LogUtils.debug("VolumeSteps adjust stream=" + stream
                                 + " virtual=" + oldDisplay + " -> " + newDisplay
                                 + " native=" + oldReal + " -> " + targetReal);
@@ -460,22 +461,6 @@ public final class VolumeStepsHook {
             return index;
         }
         return Math.max(0, Math.min(index, customMaxIndex(steps)));
-    }
-
-    /**
-     * 虚拟空间上限钳制：0..round(virtualMaxIndex * percent / 100)。
-     * 例如 50 阶 + 60% → 最大 29，之后音量键保持 29。
-     * 未配置阶数时原样返回（恢复系统默认）。
-     */
-    static int clampVirtualIndex(int index, int steps, int percent) {
-        if (steps < PreferenceStorage.MIN_VOLUME_STEPS) {
-            return index;
-        }
-        int limit = VolumeIndexMapper.calculateVirtualLimitIndex(steps, percent);
-        if (limit < 0) {
-            return clampValidIndex(index, steps);
-        }
-        return Math.max(0, Math.min(index, limit));
     }
 
     private static int findDirectionPosition(Method method, Object[] args) {

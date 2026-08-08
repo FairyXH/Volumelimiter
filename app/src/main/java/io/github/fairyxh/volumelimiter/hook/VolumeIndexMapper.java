@@ -22,9 +22,9 @@ import io.github.fairyxh.volumelimiter.config.PreferenceStorage;
  * virtual 49 ↔ native 75）。映射为线性近似；项目未引入音量曲线表时优先保证
  * 逻辑正确与跨版本兼容。
  *
- * <p>虚拟空间的最大允许索引（例如 60% 限制下 virtual 49 → 29）由
- * {@link #virtualLimitIndex(int, int)} 计算，由调用方（VolumeStepsHook）在 set/adjust
- * 入口执行；本类只提供计算，不改变映射公式本身。
+ * <p>virtualSteps 只决定分辨率：无论 50 阶还是 100 阶，满格虚拟索引都映射到
+ * 同一个 nativeLimitIndex（100% 限制时 = nativeMaxIndex），因此改变阶数不会
+ * 改变真实最大音量。
  */
 public final class VolumeIndexMapper {
     /** 每个音频流缓存的真实 native 最大索引（AudioSystem.getMaxVolumeIndex 原值）。 */
@@ -54,29 +54,9 @@ public final class VolumeIndexMapper {
     }
 
     /**
-     * 虚拟空间最大允许索引：round(virtualMaxIndex * percent / 100)，钳制在 0..virtualMaxIndex。
-     * 例如 50 阶 + 60% → round(49 * 0.6) = 29。阶数未激活时返回 -1。
-     */
-    public int virtualLimitIndex(int steps, int percent) {
-        if (!isActive(steps) || virtualMaxIndex(steps) <= 0) {
-            return -1;
-        }
-        return calculateVirtualLimitIndex(steps, percent);
-    }
-
-    /** 纯静态计算虚拟空间上限，供无 mapper 实例的静态上下文（如 VolumeStepsHook）使用。 */
-    static int calculateVirtualLimitIndex(int steps, int percent) {
-        int vMax = VolumeStepsHook.customMaxIndex(steps);
-        if (vMax <= 0) {
-            return -1;
-        }
-        long allowed = Math.round((double) vMax * clampPercent(percent) / 100.0);
-        return (int) Math.max(0L, Math.min(vMax, allowed));
-    }
-
-    /**
      * 真实空间上限：nativeMaxIndex * percent / 100（向上取整，保留至少 1 档）。
      * 真实最大值未缓存时返回 -1，调用方应视为映射不可用。
+     * native 上限只由真实最大值与限制百分比决定，与 virtualSteps 无关。
      */
     public int nativeLimit(int streamType, int steps, int percent) {
         int realMax = nativeMaxIndex(streamType);
@@ -129,9 +109,5 @@ public final class VolumeIndexMapper {
         }
         long scaled = (long) systemMaximum * Math.min(percent, 100);
         return (int) Math.min(systemMaximum, Math.max(1L, (scaled + 99L) / 100L));
-    }
-
-    private static int clampPercent(int percent) {
-        return Math.max(0, Math.min(100, percent));
     }
 }

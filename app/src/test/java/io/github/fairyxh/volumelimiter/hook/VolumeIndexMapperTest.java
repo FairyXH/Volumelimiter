@@ -81,37 +81,46 @@ public final class VolumeIndexMapperTest {
     }
 
     @Test
-    public void virtualLimitScalesWithPercent() {
-        VolumeIndexMapper mapper = mapperWithNativeMax();
-        // 场景3：50 阶 + 60% -> round(49 * 0.6) = 29
-        assertEquals(29, mapper.virtualLimitIndex(50, 60));
-        // 50 阶 + 50% -> round(49 * 0.5) = 25
-        assertEquals(25, mapper.virtualLimitIndex(50, 50));
-        // 50 阶 + 100% -> 满格 49
-        assertEquals(49, mapper.virtualLimitIndex(50, 100));
-        // 0% -> 0
-        assertEquals(0, mapper.virtualLimitIndex(50, 0));
+    public void fullVirtualMapsToNativeLimitWithSteps50AndLimit100() {
+        // 场景1：nativeMax=160、steps=50、limit=100 -> virtual49 == native160
+        VolumeIndexMapper mapper = new VolumeIndexMapper();
+        mapper.rememberNativeMax(STREAM_MUSIC, 160);
+        assertEquals(160, mapper.virtualToNative(STREAM_MUSIC, 49, 50, 100));
+        assertEquals(49, mapper.nativeToVirtual(STREAM_MUSIC, 160, 50, 100));
     }
 
     @Test
-    public void virtualLimitDisabledWhenStepsOff() {
-        VolumeIndexMapper mapper = mapperWithNativeMax();
-        assertEquals(-1, mapper.virtualLimitIndex(0, 60));
+    public void fullVirtualMapsToNativeLimitWithSteps100AndLimit100() {
+        // 场景2：nativeMax=160、steps=100、limit=100 -> virtual99 == native160
+        VolumeIndexMapper mapper = new VolumeIndexMapper();
+        mapper.rememberNativeMax(STREAM_MUSIC, 160);
+        assertEquals(160, mapper.virtualToNative(STREAM_MUSIC, 99, 100, 100));
+        assertEquals(99, mapper.nativeToVirtual(STREAM_MUSIC, 160, 100, 100));
     }
 
     @Test
-    public void loweredPercentStillMapsFullVirtualToNewLimit() {
-        // 场景3：steps=50、percent=30、nativeMax=150 -> virtual 49 -> native 45
-        VolumeIndexMapper mapper = mapperWithNativeMax();
-        assertEquals(45, mapper.virtualToNative(STREAM_MUSIC, 49, 50, 30));
-        assertEquals(49, mapper.nativeToVirtual(STREAM_MUSIC, 45, 50, 30));
+    public void fullVirtualMapsToNativeLimitWithSteps50AndLimit70() {
+        // 场景3：nativeMax=160、steps=50、limit=70 -> nativeLimit=112，virtual49 == native112
+        VolumeIndexMapper mapper = new VolumeIndexMapper();
+        mapper.rememberNativeMax(STREAM_MUSIC, 160);
+        assertEquals(112, mapper.nativeLimit(STREAM_MUSIC, 50, 70));
+        assertEquals(112, mapper.virtualToNative(STREAM_MUSIC, 49, 50, 70));
+        assertEquals(49, mapper.nativeToVirtual(STREAM_MUSIC, 112, 50, 70));
     }
 
     @Test
-    public void increasedPercentMapsFullVirtualToFullNative() {
-        // 场景2：percent 50 -> 100 后 virtual 49 -> native 150
-        VolumeIndexMapper mapper = mapperWithNativeMax();
-        assertEquals(150, mapper.virtualToNative(STREAM_MUSIC, 49, 50, 100));
-        assertEquals(49, mapper.nativeToVirtual(STREAM_MUSIC, 150, 50, 100));
+    public void stepsOnlyChangeResolutionNotNativeMaximum() {
+        // 场景4：steps 改变时 native 最大输出不变，只改变步进精度
+        VolumeIndexMapper mapper = new VolumeIndexMapper();
+        mapper.rememberNativeMax(STREAM_MUSIC, 160);
+        // 100% 限制：50 阶与 100 阶满格都等于 nativeMaxIndex
+        assertEquals(160, mapper.virtualToNative(STREAM_MUSIC, 49, 50, 100));
+        assertEquals(160, mapper.virtualToNative(STREAM_MUSIC, 99, 100, 100));
+        // 70% 限制：50 阶与 100 阶满格都等于 nativeLimitIndex=112
+        assertEquals(112, mapper.virtualToNative(STREAM_MUSIC, 49, 50, 70));
+        assertEquals(112, mapper.virtualToNative(STREAM_MUSIC, 99, 100, 70));
+        // 步进精度：同一 native 索引在不同阶数下显示不同虚拟值
+        assertEquals(25, mapper.nativeToVirtual(STREAM_MUSIC, 80, 50, 100));
+        assertEquals(50, mapper.nativeToVirtual(STREAM_MUSIC, 80, 100, 100));
     }
 }
