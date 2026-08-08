@@ -81,26 +81,22 @@ public final class VolumeIndexMapperTest {
     }
 
     @Test
-    public void rescaleRaisesVolumeWhenPercentIncreases() {
-        // 50% -> 100%：真实 75（旧限制 75）按比例映射到新限制 150
-        assertEquals(150, VolumeIndexMapper.rescaleForConfig(75, 75, 150));
-        // 半格：真实 38/75 -> 77/150
-        assertEquals(76, VolumeIndexMapper.rescaleForConfig(38, 75, 150));
+    public void virtualLimitScalesWithPercent() {
+        VolumeIndexMapper mapper = mapperWithNativeMax();
+        // 场景3：50 阶 + 60% -> round(49 * 0.6) = 29
+        assertEquals(29, mapper.virtualLimitIndex(50, 60));
+        // 50 阶 + 50% -> round(49 * 0.5) = 25
+        assertEquals(25, mapper.virtualLimitIndex(50, 50));
+        // 50 阶 + 100% -> 满格 49
+        assertEquals(49, mapper.virtualLimitIndex(50, 100));
+        // 0% -> 0
+        assertEquals(0, mapper.virtualLimitIndex(50, 0));
     }
 
     @Test
-    public void rescaleLowersVolumeWhenPercentDecreases() {
-        // 100% -> 30%：真实 150（旧限制 150）-> 45
-        assertEquals(45, VolumeIndexMapper.rescaleForConfig(150, 150, 45));
-        // 50% -> 30%：真实 75（旧限制 75）-> 45
-        assertEquals(45, VolumeIndexMapper.rescaleForConfig(75, 75, 45));
-    }
-
-    @Test
-    public void rescaleKeepsValueWhenOldLimitUnknownOrNewLimitZero() {
-        assertEquals(75, VolumeIndexMapper.rescaleForConfig(75, -1, 150));
-        assertEquals(75, VolumeIndexMapper.rescaleForConfig(75, 0, 150));
-        assertEquals(0, VolumeIndexMapper.rescaleForConfig(75, 75, 0));
+    public void virtualLimitDisabledWhenStepsOff() {
+        VolumeIndexMapper mapper = mapperWithNativeMax();
+        assertEquals(-1, mapper.virtualLimitIndex(0, 60));
     }
 
     @Test
