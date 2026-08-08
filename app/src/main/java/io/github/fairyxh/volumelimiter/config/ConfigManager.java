@@ -107,7 +107,6 @@ public final class ConfigManager implements SharedPreferences.OnSharedPreference
     @SuppressWarnings("FieldCanBeLocal")
     private final FileObserver systemRuleObserver;
     private final AtomicReference<Snapshot> snapshot = new AtomicReference<>();
-    private volatile Runnable postReloadListener;
 
     public ConfigManager(SharedPreferences preferences) {
         this(preferences, null);
@@ -123,11 +122,6 @@ public final class ConfigManager implements SharedPreferences.OnSharedPreference
 
     public Snapshot snapshot() {
         return snapshot.get();
-    }
-
-    /** 每次配置 reload（含新快照发布）完成后调用；用于音量重同步等 Hook 侧响应。 */
-    public void setPostReloadListener(Runnable listener) {
-        this.postReloadListener = listener;
     }
 
     public void refresh() {
@@ -185,14 +179,6 @@ public final class ConfigManager implements SharedPreferences.OnSharedPreference
                 streams,
                 devices,
                 apps));
-        Runnable listener = postReloadListener;
-        if (listener != null) {
-            try {
-                listener.run();
-            } catch (Throwable error) {
-                LogUtils.error("[VLM][Config] Post-reload listener failed", error);
-            }
-        }
     }
 
     private AppRule readPreferenceRule(String packageName) {

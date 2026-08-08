@@ -43,8 +43,6 @@ public final class AudioServiceHook {
         VolumeIndexMapper mapper = new VolumeIndexMapper();
         VolumeAdjustHook limiter = new VolumeAdjustHook(
                 configManager, routeHook, appResolver, mapper, audioServiceClass);
-        VolumeStateSynchronizer synchronizer = new VolumeStateSynchronizer(
-                configManager, mapper, audioServiceClass);
         new VolumeStepsHook(module, configManager, mapper).install(classLoader, audioServiceClass);
         HandlerThread correctionThread = new HandlerThread("Volumelimiter-correction");
         correctionThread.start();
@@ -56,9 +54,7 @@ public final class AudioServiceHook {
         };
         focusTracker.setOwnerChangeListener(requestCorrection::run);
         ForegroundChangeHook.install(module, classLoader, requestCorrection);
-        hookConstructors(audioServiceClass, limiter, synchronizer);
-        // 配置 reload（volumeSteps / masterPercent 变化）后重算所有流的真实音量。
-        configManager.setPostReloadListener(synchronizer::syncIfConfigChanged);
+        hookConstructors(audioServiceClass, limiter);
         Set<String> installedSignatures = new HashSet<>();
         int installed = 0;
 
@@ -81,8 +77,7 @@ public final class AudioServiceHook {
         return installed;
     }
 
-    private void hookConstructors(Class<?> audioServiceClass, VolumeAdjustHook limiter,
-                                  VolumeStateSynchronizer synchronizer) {
+    private void hookConstructors(Class<?> audioServiceClass, VolumeAdjustHook limiter) {
         for (Constructor<?> constructor : audioServiceClass.getDeclaredConstructors()) {
             try {
                 constructor.setAccessible(true);
@@ -92,7 +87,6 @@ public final class AudioServiceHook {
                         .intercept(chain -> {
                             Object result = chain.proceed();
                             limiter.rememberAudioService(chain.getThisObject());
-                            synchronizer.rememberAudioService(chain.getThisObject());
                             return result;
                         });
             } catch (Throwable error) {
