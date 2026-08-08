@@ -15,11 +15,11 @@ import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
 
 public final class AudioServiceHook {
-    private static final Set<String> SET_METHODS = Set.of(
-            "setStreamVolume", "setStreamVolumeWithAttribution");
-    private static final Set<String> ADJUST_METHODS = Set.of(
-            "adjustStreamVolume", "adjustSuggestedStreamVolume",
-            "adjustSuggestedStreamVolumeForUid");
+    /** 覆盖所有可能入口（含 OEM/Android 12+ 变体）：名称前缀匹配，不依赖精确签名。 */
+    private static final String SET_PREFIX = "setStreamVolume";
+    private static final String[] ADJUST_PREFIXES = {
+            "adjustStreamVolume", "adjustSuggestedStreamVolume"
+    };
 
     private final XposedModule module;
     private final ConfigManager configManager;
@@ -57,6 +57,7 @@ public final class AudioServiceHook {
         hookConstructors(audioServiceClass, limiter);
         Set<String> installedSignatures = new HashSet<>();
         int installed = 0;
+        int limitCandidates = 0;
 
         for (Class<?> current = audioServiceClass; current != null; current = current.getSuperclass()) {
             for (Method method : current.getDeclaredMethods()) {
@@ -65,16 +66,30 @@ public final class AudioServiceHook {
                         || method.isSynthetic()) {
                     continue;
                 }
-                if (SET_METHODS.contains(method.getName())) {
+                if (method.getName().startsWith(SET_PREFIX)) {
+                    limitCandidates++;
                     installed += hookSetMethod(method, limiter);
-                } else if (ADJUST_METHODS.contains(method.getName())) {
+                } else if (nameStartsWithAny(method.getName(), ADJUST_PREFIXES)) {
+                    limitCandidates++;
                     installed += hookAdjustMethod(method, limiter);
+                } else if (method.getName().contains("Volume")) {
+                    // 启动时枚举所有音量相关方法，便于确认 ROM 实际入口
+                    LogUtils.info("AudioService volume method (not hooked): " + signature);
                 }
             }
         }
         LogUtils.info("Installed " + installed + " AudioService hooks on API "
-                + android.os.Build.VERSION.SDK_INT);
+                + android.os.Build.VERSION.SDK_INT + " (limit candidates=" + limitCandidates + ")");
         return installed;
+    }
+
+    private static boolean nameStartsWithAny(String name, String[] prefixes) {
+        for (String prefix : prefixes) {
+            if (name.startsWith(prefix)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void hookConstructors(Class<?> audioServiceClass, VolumeAdjustHook limiter) {
@@ -112,7 +127,7 @@ public final class AudioServiceHook {
                             return chain.proceed();
                         }
                     });
-            LogUtils.debug("Hooked " + method);
+            LogUtils.info("LimitHook installed: " + method);
             return 1;
         } catch (Throwable error) {
             LogUtils.error("Unable to hook " + method, error);
@@ -137,7 +152,7 @@ public final class AudioServiceHook {
                         }
                         return chain.proceed();
                     });
-            LogUtils.debug("Hooked " + method);
+            LogUtils.info("LimitHook installed: " + method);
             return 1;
         } catch (Throwable error) {
             LogUtils.error("Unable to hook " + method, error);

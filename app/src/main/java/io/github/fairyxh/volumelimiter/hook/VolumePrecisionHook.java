@@ -3,8 +3,6 @@ package io.github.fairyxh.volumelimiter.hook;
 import android.media.AudioManager;
 
 import java.lang.reflect.Method;
-import java.util.HashSet;
-import java.util.Set;
 
 import io.github.fairyxh.volumelimiter.config.ConfigManager;
 import io.github.fairyxh.volumelimiter.config.PreferenceStorage;
@@ -25,14 +23,14 @@ import io.github.libxposed.api.XposedModule;
  * 独立钳制，与本类无关。本类只 hook adjust* 方法（LOWEST，位于限制之后）。
  */
 public final class VolumePrecisionHook {
-    private static final Set<String> ADJUST_METHODS = Set.of(
-            "adjustStreamVolume", "adjustSuggestedStreamVolume",
-            "adjustSuggestedStreamVolumeForUid");
+    /** 覆盖所有可能入口（含 OEM/Android 12+ 变体）：名称前缀匹配，不依赖精确签名。 */
+    private static final String[] ADJUST_PREFIXES = {
+            "adjustStreamVolume", "adjustSuggestedStreamVolume"
+    };
 
     private final XposedModule module;
     private final ConfigManager configManager;
     private final VolumeIndexMapper mapper;
-    private final Set<Integer> loggedStreams = new HashSet<>();
     private ClassLoader classLoader;
     private Method getStreamVolume;
     private Method getActiveStreamType;
@@ -56,7 +54,7 @@ public final class VolumePrecisionHook {
                 if (method.isSynthetic()) {
                     continue;
                 }
-                if (ADJUST_METHODS.contains(method.getName())) {
+                if (nameStartsWithAny(method.getName(), ADJUST_PREFIXES)) {
                     installed += hookAdjustStreamVolume(method);
                 }
             }
@@ -65,6 +63,15 @@ public final class VolumePrecisionHook {
             LogUtils.info("Installed " + installed + " volume-precision hooks");
         }
         return installed;
+    }
+
+    private static boolean nameStartsWithAny(String name, String[] prefixes) {
+        for (String prefix : prefixes) {
+            if (name.startsWith(prefix)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -81,6 +88,8 @@ public final class VolumePrecisionHook {
                     .intercept(chain -> {
                         ConfigManager.Snapshot config = configManager.snapshot();
                         if (config.adjustPrecision < PreferenceStorage.MIN_ADJUST_PRECISION) {
+                            LogUtils.info("PrecisionHook: disabled precision=0 method="
+                                    + method.getName() + " -> passthrough");
                             return chain.proceed();
                         }
                         Object[] args = chain.getArgs().toArray();
@@ -97,11 +106,15 @@ public final class VolumePrecisionHook {
                         int stream = resolveAdjustmentStream(chain.getThisObject(),
                                 method, args, directionPosition);
                         if (stream < 0) {
+                            LogUtils.info("PrecisionHook: stream unresolved method="
+                                    + method.getName() + " -> passthrough");
                             return chain.proceed();
                         }
                         ensureNativeMax(stream);
                         int step = mapper.adjustStep(stream, config.adjustPrecision);
                         if (step < 0) {
+                            LogUtils.info("PrecisionHook: nativeMax unknown stream=" + stream
+                                    + " -> passthrough");
                             return chain.proceed();
                         }
                         int current = readStreamVolume(chain.getThisObject(), stream);
@@ -115,33 +128,28 @@ public final class VolumePrecisionHook {
                             target = Math.min(target, nativeLimit);
                         }
                         target = Math.max(0, target);
+                        // 每次按音量键都输出，用于确认 Hook 命中与实际入口
+                        LogUtils.info("PrecisionHook: method=" + method.getName()
+                                + " stream=" + stream
+                                + " oldIndex=" + current
+                                + " direction=" + direction
+                                + " step=" + step
+                                + " newIndex=" + target
+                                + " limit=" + nativeLimit);
                         if (target == current) {
                             return null;
                         }
                         int flags = args.length > 2 && args[2] instanceof Integer
                                 ? (Integer) args[2] : 0;
-                        logAdjust(stream, config, current, target, step, nativeLimit);
                         callSetStreamVolume(chain.getThisObject(), stream, target, flags);
                         return null;
                     });
-            LogUtils.debug("VolumePrecision hooked " + method.getName());
+            LogUtils.info("PrecisionHook installed: " + method);
             return 1;
         } catch (Throwable error) {
-            LogUtils.debug("VolumePrecision unable to hook " + method.getName() + ": " + error);
+            LogUtils.error("VolumePrecision unable to hook " + method.getName(), error);
             return 0;
         }
-    }
-
-    private void logAdjust(int stream, ConfigManager.Snapshot config, int current,
-                           int target, int step, int nativeLimit) {
-        if (loggedStreams.add(stream)) {
-            LogUtils.info("VolumePrecision mapper initialized: nativeMaxIndex="
-                    + mapper.nativeMaxIndex(stream) + " precision=" + config.adjustPrecision
-                    + " step=" + step + " nativeLimit=" + nativeLimit);
-        }
-        LogUtils.debug("VolumePrecision adjust stream=" + stream
-                + " native=" + current + " -> " + target
-                + " step=" + step + " limit=" + nativeLimit);
     }
 
     private int resolveAdjustmentStream(Object audioService, Method method, Object[] args,
@@ -209,7 +217,8 @@ public final class VolumePrecisionHook {
     }
 
     private static int findDirectionPosition(Method method, Object[] args) {
-        int position = method.getName().equals("adjustStreamVolume") ? 1 : 0;
+        // adjustStreamVolume* 的 direction 在第 2 个参数；adjustSuggestedStreamVolume* 在第 1 个
+        int position = method.getName().startsWith("adjustStreamVolume") ? 1 : 0;
         Class<?>[] types = method.getParameterTypes();
         if (position >= types.length || position >= args.length || types[position] != int.class
                 || !(args[position] instanceof Integer)) {

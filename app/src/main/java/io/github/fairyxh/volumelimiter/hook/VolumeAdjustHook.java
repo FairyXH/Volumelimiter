@@ -103,8 +103,8 @@ public final class VolumeAdjustHook {
         }
         Object[] changed = originalArgs.clone();
         changed[indexPosition] = maximum;
-        LogUtils.debug(method.getName() + " stream=" + streamType + " requested=" + requested
-                + " limited=" + maximum);
+        LogUtils.info("LimitHook: clamped " + method.getName() + " stream=" + streamType
+                + " requested=" + requested + " limited=" + maximum);
         return changed;
     }
 
@@ -127,9 +127,11 @@ public final class VolumeAdjustHook {
         int maximum = calculateMaximum(audioService, streamType, null, args);
         int current = invokeInt(getStreamVolume, audioService, streamType, -1);
         boolean blocked = current >= 0 && current >= maximum;
+        LogUtils.debug(method.getName() + " adjust decision stream=" + streamType
+                + " current=" + current + " maximum=" + maximum + " blocked=" + blocked);
         if (blocked) {
-            LogUtils.debug(method.getName() + " blocked stream=" + streamType + " current="
-                    + current + " maximum=" + maximum);
+            LogUtils.info("LimitHook: blocked " + method.getName() + " stream=" + streamType
+                    + " current=" + current + " limit=" + maximum);
         }
         return blocked;
     }
@@ -166,7 +168,7 @@ public final class VolumeAdjustHook {
 
     static int selectAdjustmentStream(String methodName, Object[] args, int directionPosition,
                                       IntUnaryOperator activeStreamResolver) {
-        if (methodName.equals("adjustStreamVolume")) {
+        if (methodName.startsWith("adjustStreamVolume")) {
             return args.length > 0 && args[0] instanceof Integer value && isKnownStream(value)
                     ? value : -1;
         }
@@ -211,7 +213,8 @@ public final class VolumeAdjustHook {
     }
 
     private static int findDirectionPosition(Method method, Object[] args) {
-        int position = method.getName().equals("adjustStreamVolume") ? 1 : 0;
+        // adjustStreamVolume* 的 direction 在第 2 个参数；adjustSuggestedStreamVolume* 在第 1 个
+        int position = method.getName().startsWith("adjustStreamVolume") ? 1 : 0;
         Class<?>[] types = method.getParameterTypes();
         if (position >= types.length || position >= args.length || types[position] != int.class
                 || !(args[position] instanceof Integer)) {
