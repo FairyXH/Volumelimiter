@@ -58,8 +58,16 @@ public final class VolumeIndexMapper {
      * 例如 50 阶 + 60% → round(49 * 0.6) = 29。阶数未激活时返回 -1。
      */
     public int virtualLimitIndex(int steps, int percent) {
-        int vMax = virtualMaxIndex(steps);
-        if (!isActive(steps) || vMax <= 0) {
+        if (!isActive(steps) || virtualMaxIndex(steps) <= 0) {
+            return -1;
+        }
+        return calculateVirtualLimitIndex(steps, percent);
+    }
+
+    /** 纯静态计算虚拟空间上限，供无 mapper 实例的静态上下文（如 VolumeStepsHook）使用。 */
+    static int calculateVirtualLimitIndex(int steps, int percent) {
+        int vMax = VolumeStepsHook.customMaxIndex(steps);
+        if (vMax <= 0) {
             return -1;
         }
         long allowed = Math.round((double) vMax * clampPercent(percent) / 100.0);

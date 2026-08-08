@@ -471,7 +471,7 @@ public final class VolumeStepsHook {
         if (steps < PreferenceStorage.MIN_VOLUME_STEPS) {
             return index;
         }
-        int limit = VolumeIndexMapper.virtualLimitIndex(steps, percent);
+        int limit = VolumeIndexMapper.calculateVirtualLimitIndex(steps, percent);
         if (limit < 0) {
             return clampValidIndex(index, steps);
         }
