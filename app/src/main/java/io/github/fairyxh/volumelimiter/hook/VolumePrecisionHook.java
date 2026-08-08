@@ -150,6 +150,9 @@ public final class VolumePrecisionHook {
                             return null;
                         }
                         callSetStreamVolume(chain.getThisObject(), stream, target, flags);
+                        // Oplus/ColorOS 的音量条只响应原生 adjust 链的 sendVolumeUpdate；
+                        // 改走 setStreamVolume 后主动反射通知一次，让浮条弹出。
+                        notifyVolumeUi(chain.getThisObject(), stream, current, target, flags);
                         return null;
                     });
             LogUtils.info("PrecisionHook installed: " + method);
@@ -188,6 +191,44 @@ public final class VolumePrecisionHook {
         } catch (Throwable error) {
             LogUtils.debug("VolumePrecision unable to read stream volume: " + error);
             return -1;
+        }
+    }
+
+    /**
+     * 反射调用 AudioService.sendVolumeUpdate(int,int,int,int) 通知 SystemUI
+     * 显示音量条。Oplus/ColorOS 的 VolumeDialog 只响应原生 adjust 链发出的
+     * 通知，改走 setStreamVolume 后需要主动补发。找不到方法时 fail-open。
+     */
+    private void notifyVolumeUi(Object audioService, int stream, int oldIndex,
+                                int newIndex, int flags) {
+        if (audioService == null) {
+            return;
+        }
+        try {
+            Method sendVolumeUpdate = null;
+            for (Class<?> current = audioService.getClass(); current != null && sendVolumeUpdate == null;
+                 current = current.getSuperclass()) {
+                for (Method method : current.getDeclaredMethods()) {
+                    Class<?>[] types = method.getParameterTypes();
+                    if (method.getName().equals("sendVolumeUpdate")
+                            && types.length == 4
+                            && types[0] == int.class && types[1] == int.class
+                            && types[2] == int.class && types[3] == int.class) {
+                        method.setAccessible(true);
+                        sendVolumeUpdate = method;
+                        break;
+                    }
+                }
+            }
+            if (sendVolumeUpdate == null) {
+                LogUtils.info("PrecisionHook: sendVolumeUpdate not found, volume UI skipped");
+                return;
+            }
+            sendVolumeUpdate.invoke(audioService, stream, oldIndex, newIndex, flags);
+            LogUtils.info("PrecisionHook: volume UI notified stream=" + stream
+                    + " old=" + oldIndex + " new=" + newIndex + " flags=" + flags);
+        } catch (Throwable error) {
+            LogUtils.info("PrecisionHook: volume UI notify failed: " + error);
         }
     }
 
