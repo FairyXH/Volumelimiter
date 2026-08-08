@@ -195,9 +195,11 @@ public final class VolumePrecisionHook {
     }
 
     /**
-     * 反射调用 AudioService.sendVolumeUpdate(int,int,int,int) 通知 SystemUI
-     * 显示音量条。Oplus/ColorOS 的 VolumeDialog 只响应原生 adjust 链发出的
-     * 通知，改走 setStreamVolume 后需要主动补发。找不到方法时 fail-open。
+     * 通知 SystemUI 显示音量条。依次尝试：
+     * 1) AudioService.sendVolumeUpdate(int,int,int,int)（AOSP 标准路径）
+     * 2) AudioService.mVolumeController.postVolumeChanged(int,int)（更底层，
+     *    Oplus/ColorOS 可能删除了 sendVolumeUpdate 但保留了通知核心）
+     * 全部失败时 fail-open，不影响音量功能。
      */
     private void notifyVolumeUi(Object audioService, int stream, int oldIndex,
                                 int newIndex, int flags) {
@@ -205,8 +207,22 @@ public final class VolumePrecisionHook {
             return;
         }
         try {
-            Method sendVolumeUpdate = null;
-            for (Class<?> current = audioService.getClass(); current != null && sendVolumeUpdate == null;
+            if (invokeSendVolumeUpdate(audioService, stream, oldIndex, newIndex, flags)) {
+                return;
+            }
+            if (invokeVolumeController(audioService, stream, flags)) {
+                return;
+            }
+            LogUtils.info("PrecisionHook: volume UI notify unavailable stream=" + stream);
+        } catch (Throwable error) {
+            LogUtils.info("PrecisionHook: volume UI notify failed: " + error);
+        }
+    }
+
+    private boolean invokeSendVolumeUpdate(Object audioService, int stream, int oldIndex,
+                                           int newIndex, int flags) {
+        try {
+            for (Class<?> current = audioService.getClass(); current != null;
                  current = current.getSuperclass()) {
                 for (Method method : current.getDeclaredMethods()) {
                     Class<?>[] types = method.getParameterTypes();
@@ -215,20 +231,63 @@ public final class VolumePrecisionHook {
                             && types[0] == int.class && types[1] == int.class
                             && types[2] == int.class && types[3] == int.class) {
                         method.setAccessible(true);
-                        sendVolumeUpdate = method;
-                        break;
+                        method.invoke(audioService, stream, oldIndex, newIndex, flags);
+                        LogUtils.info("PrecisionHook: volume UI notified stream=" + stream
+                                + " old=" + oldIndex + " new=" + newIndex + " flags=" + flags);
+                        return true;
                     }
                 }
             }
-            if (sendVolumeUpdate == null) {
-                LogUtils.info("PrecisionHook: sendVolumeUpdate not found, volume UI skipped");
-                return;
-            }
-            sendVolumeUpdate.invoke(audioService, stream, oldIndex, newIndex, flags);
-            LogUtils.info("PrecisionHook: volume UI notified stream=" + stream
-                    + " old=" + oldIndex + " new=" + newIndex + " flags=" + flags);
         } catch (Throwable error) {
-            LogUtils.info("PrecisionHook: volume UI notify failed: " + error);
+            LogUtils.debug("PrecisionHook sendVolumeUpdate path failed: " + error);
+        }
+        return false;
+    }
+
+    private boolean invokeVolumeController(Object audioService, int stream, int flags) {
+        try {
+            java.lang.reflect.Field controllerField = null;
+            for (Class<?> current = audioService.getClass(); current != null && controllerField == null;
+                 current = current.getSuperclass()) {
+                try {
+                    controllerField = current.getDeclaredField("mVolumeController");
+                } catch (NoSuchFieldException ignored) {
+                    // Continue up the hierarchy.
+                }
+            }
+            if (controllerField == null) {
+                LogUtils.info("PrecisionHook: mVolumeController field not found");
+                return false;
+            }
+            controllerField.setAccessible(true);
+            Object controller = controllerField.get(audioService);
+            if (controller == null) {
+                LogUtils.info("PrecisionHook: mVolumeController is null (SystemUI not registered)");
+                return false;
+            }
+            Method postVolumeChanged = null;
+            for (Method method : controller.getClass().getDeclaredMethods()) {
+                Class<?>[] types = method.getParameterTypes();
+                if (method.getName().equals("postVolumeChanged")
+                        && types.length == 2
+                        && types[0] == int.class && types[1] == int.class) {
+                    method.setAccessible(true);
+                    postVolumeChanged = method;
+                    break;
+                }
+            }
+            if (postVolumeChanged == null) {
+                LogUtils.info("PrecisionHook: postVolumeChanged not found on "
+                        + controller.getClass().getName());
+                return false;
+            }
+            postVolumeChanged.invoke(controller, stream, flags);
+            LogUtils.info("PrecisionHook: volume UI notified via mVolumeController stream="
+                    + stream + " flags=" + flags);
+            return true;
+        } catch (Throwable error) {
+            LogUtils.info("PrecisionHook: mVolumeController path failed: " + error);
+            return false;
         }
     }
 
