@@ -46,20 +46,20 @@ public final class ConfigManager implements SharedPreferences.OnSharedPreference
     public static final class Snapshot {
         public final boolean enabled;
         public final boolean debug;
-        public final int volumeSteps;
+        public final int adjustPrecision;
         private final int masterPercent;
         private final boolean perAppEnabled;
         private final Map<Integer, Integer> streamPercents;
         private final Map<String, Integer> devicePercents;
         private final Map<String, AppRule> appRules;
 
-        Snapshot(boolean enabled, boolean debug, int volumeSteps, int masterPercent,
+        Snapshot(boolean enabled, boolean debug, int adjustPrecision, int masterPercent,
                  boolean perAppEnabled,
                  Map<Integer, Integer> streamPercents, Map<String, Integer> devicePercents,
                  Map<String, AppRule> appRules) {
             this.enabled = enabled;
             this.debug = debug;
-            this.volumeSteps = volumeSteps;
+            this.adjustPrecision = adjustPrecision;
             this.masterPercent = masterPercent;
             this.perAppEnabled = perAppEnabled;
             this.streamPercents = Collections.unmodifiableMap(new HashMap<>(streamPercents));
@@ -172,7 +172,7 @@ public final class ConfigManager implements SharedPreferences.OnSharedPreference
         snapshot.set(new Snapshot(
                 preferences.getBoolean(PreferenceStorage.KEY_ENABLED, false),
                 preferences.getBoolean(PreferenceStorage.KEY_DEBUG, false),
-                PreferenceStorage.readVolumeSteps(preferences),
+                PreferenceStorage.readAdjustPrecision(preferences),
                 PreferenceStorage.readPercent(preferences,
                         PreferenceStorage.KEY_MASTER_PERCENT, 100),
                 preferences.getBoolean(PreferenceStorage.KEY_PER_APP_ENABLED, false) || !apps.isEmpty(),

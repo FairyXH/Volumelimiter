@@ -144,18 +144,18 @@ public final class SettingsActivity extends RemotePreferencesActivity {
         addLimiter("启用音量限制", PreferenceStorage.KEY_ENABLED,
                 PreferenceStorage.KEY_MASTER_PERCENT, "所有设备和应用的默认上限");
 
-        addSection("音量阶数");
-        addBody("设置音量滑块的总档位数，例如 30 表示 0-29 共 30 档。留空或输入 0 使用系统默认值；修改后建议重启系统让内部音量上限完全生效。");
+        addSection("调节精度");
+        addBody("设置从 0 到满音量需要按多少次音量键，例如 100 表示按约 100 次到满（每次约 最大值÷100 档）。只影响音量键步进，不改变显示最大值；留空或输入 0 使用系统默认（每次 1 档）。");
         EditText stepsInput = new EditText(this);
         stepsInput.setHint("留空使用系统默认");
         stepsInput.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
         stepsInput.setSingleLine(true);
-        int steps = PreferenceStorage.readVolumeSteps(preferences);
-        stepsInput.setText(steps > 0 ? String.valueOf(steps) : "");
+        int precision = PreferenceStorage.readAdjustPrecision(preferences);
+        stepsInput.setText(precision > 0 ? String.valueOf(precision) : "");
         content.addView(stepsInput, matchWrap());
         LinearLayout stepsRow = new LinearLayout(this);
         Button saveSteps = new Button(this);
-        saveSteps.setText("保存音量阶数");
+        saveSteps.setText("保存调节精度");
         saveSteps.setOnClickListener(view -> {
             int parsed;
             String text = stepsInput.getText().toString().trim();
@@ -165,25 +165,25 @@ public final class SettingsActivity extends RemotePreferencesActivity {
                 try {
                     parsed = Integer.parseInt(text);
                 } catch (NumberFormatException error) {
-                    toast("请输入 0-" + PreferenceStorage.MAX_VOLUME_STEPS
+                    toast("请输入 0-" + PreferenceStorage.MAX_ADJUST_PRECISION
                             + " 之间的整数");
                     return;
                 }
             }
-            if (parsed < 0 || parsed > PreferenceStorage.MAX_VOLUME_STEPS) {
-                toast("请输入 0-" + PreferenceStorage.MAX_VOLUME_STEPS
+            if (parsed < 0 || parsed > PreferenceStorage.MAX_ADJUST_PRECISION) {
+                toast("请输入 0-" + PreferenceStorage.MAX_ADJUST_PRECISION
                         + " 之间的整数");
                 return;
             }
             SharedPreferences.Editor editor = preferences.edit();
             if (parsed == 0) {
-                editor.remove(PreferenceStorage.KEY_VOLUME_STEPS);
+                editor.remove(PreferenceStorage.KEY_ADJUST_PRECISION);
             } else {
-                editor.putInt(PreferenceStorage.KEY_VOLUME_STEPS, parsed);
+                editor.putInt(PreferenceStorage.KEY_ADJUST_PRECISION, parsed);
             }
             if (editor.commit()) {
-                toast(parsed == 0 ? "已恢复系统默认阶数"
-                        : "音量阶数已保存为 " + parsed);
+                toast(parsed == 0 ? "已恢复系统默认精度"
+                        : "调节精度已保存为 " + parsed);
             } else {
                 toast("保存失败");
             }
@@ -191,11 +191,11 @@ public final class SettingsActivity extends RemotePreferencesActivity {
         stepsRow.addView(saveSteps, new LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1));
         Button restoreSteps = new Button(this);
-        restoreSteps.setText("恢复默认阶数");
+        restoreSteps.setText("恢复默认精度");
         restoreSteps.setOnClickListener(view -> {
-            if (preferences.edit().remove(PreferenceStorage.KEY_VOLUME_STEPS).commit()) {
+            if (preferences.edit().remove(PreferenceStorage.KEY_ADJUST_PRECISION).commit()) {
                 stepsInput.setText("");
-                toast("已恢复系统默认阶数");
+                toast("已恢复系统默认精度");
             } else {
                 toast("操作失败");
             }

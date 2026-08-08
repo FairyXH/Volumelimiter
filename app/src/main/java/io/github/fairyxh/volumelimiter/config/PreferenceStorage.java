@@ -12,10 +12,11 @@ public final class PreferenceStorage {
     public static final String GROUP = "volume_limiter";
     public static final String KEY_ENABLED = "enabled";
     public static final String KEY_MASTER_PERCENT = "master_percent";
-    public static final String KEY_VOLUME_STEPS = "volume_steps";
-    public static final int DEFAULT_VOLUME_STEPS = 0;
-    public static final int MIN_VOLUME_STEPS = 1;
-    public static final int MAX_VOLUME_STEPS = 100;
+    /** 调节精度：从 0 到满音量需要经过的调节步数（0 = 关闭，使用系统原生每次 1 档）。 */
+    public static final String KEY_ADJUST_PRECISION = "volume_steps";
+    public static final int DEFAULT_ADJUST_PRECISION = 0;
+    public static final int MIN_ADJUST_PRECISION = 1;
+    public static final int MAX_ADJUST_PRECISION = 100;
     public static final String KEY_PER_APP_ENABLED = "per_app_enabled";
     public static final String KEY_APP_PACKAGES = "app_packages";
     public static final String KEY_DEBUG = "debug";
@@ -141,12 +142,15 @@ public final class PreferenceStorage {
         return LimitPolicy.clamp(preferences.getInt(key, fallback));
     }
 
-    /** 0 means the system default step count; larger values are clamped to the supported range. */
-    public static int readVolumeSteps(SharedPreferences preferences) {
-        int steps = preferences.getInt(KEY_VOLUME_STEPS, DEFAULT_VOLUME_STEPS);
-        if (steps < MIN_VOLUME_STEPS) {
-            return DEFAULT_VOLUME_STEPS;
+    /**
+     * 0 means the system default step size (native +/-1); larger values are clamped
+     * to the supported precision range.
+     */
+    public static int readAdjustPrecision(SharedPreferences preferences) {
+        int precision = preferences.getInt(KEY_ADJUST_PRECISION, DEFAULT_ADJUST_PRECISION);
+        if (precision < MIN_ADJUST_PRECISION) {
+            return DEFAULT_ADJUST_PRECISION;
         }
-        return Math.min(steps, MAX_VOLUME_STEPS);
+        return Math.min(precision, MAX_ADJUST_PRECISION);
     }
 }

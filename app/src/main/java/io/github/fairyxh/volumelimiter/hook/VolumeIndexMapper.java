@@ -1,30 +1,26 @@
 package io.github.fairyxh.volumelimiter.hook;
 
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import io.github.fairyxh.volumelimiter.config.PreferenceStorage;
+import io.github.fairyxh.volumelimiter.utils.LogUtils;
 
 /**
- * 虚拟音量阶数映射器：只负责“用户虚拟音量空间”和“Android 真实音量空间”之间的转换，
- * 不做任何状态同步或配置变化重投影。
+ * 真实音量空间的限制与调节步长计算器。不引入虚拟音量空间：
+ * UI/API 始终使用 Android 真实索引（0..nativeMaxIndex），getStreamVolume /
+ * getStreamMaxVolume 完全直通原值。
  *
- * <p>用户空间：0..N-1（N 阶，例如 50 阶 → 0..49），仅用于 UI 显示和音量键步进。
- * 真实空间：0..nativeMaxIndex（例如 0..160），是 AudioService 内部 / AudioFlinger
- * 实际使用的索引。最大音量百分比通过真实上限 nativeLimit 表达：
- *
- * <pre>
- * nativeLimit = nativeMaxIndex * maxVolumePercent / 100
- * </pre>
- *
- * <p>最终映射为 virtual 0..N-1 ↔ native 0..nativeLimit，因此“满格”（N-1）恰好对应
- * maxVolumePercent 的真实音量（例如 50 阶 + 50% 限制 + nativeMax=150 →
- * virtual 49 ↔ native 75）。映射为线性近似；项目未引入音量曲线表时优先保证
- * 逻辑正确与跨版本兼容。
- *
- * <p>virtualSteps 只决定分辨率：无论 50 阶还是 100 阶，满格虚拟索引都映射到
- * 同一个 nativeLimitIndex（100% 限制时 = nativeMaxIndex），因此改变阶数不会
- * 改变真实最大音量。
+ * <p>两个独立概念：
+ * <ul>
+ *   <li>最大音量限制：nativeLimitIndex = nativeMaxIndex * masterPercent / 100，
+ *       所有设置路径（setStreamVolume、adjustStreamVolume）都钳制到该上限。</li>
+ *   <li>调节精度：音量键一次调整的步长 = round(nativeMaxIndex / precision)。
+ *       例如 nativeMax=160、precision=50 → 每次约 3；precision=100 → 每次约 2。
+ *       precision 只影响 adjustStreamVolume 的步进，不改变真实最大值。</li>
+ * </ul>
  */
 public final class VolumeIndexMapper {
     /** 每个音频流缓存的真实 native 最大索引（AudioSystem.getMaxVolumeIndex 原值）。 */
@@ -43,63 +39,75 @@ public final class VolumeIndexMapper {
         return value == null ? -1 : value;
     }
 
-    /** 虚拟阶数是否激活（steps >= 1）。 */
-    public boolean isActive(int steps) {
-        return steps >= PreferenceStorage.MIN_VOLUME_STEPS;
-    }
-
-    /** 用户空间最大索引（0 基），未配置时返回 -1。 */
-    public int virtualMaxIndex(int steps) {
-        return VolumeStepsHook.customMaxIndex(steps);
+    /** 调节精度是否激活（precision >= 1）。 */
+    public boolean isActive(int precision) {
+        return precision >= PreferenceStorage.MIN_ADJUST_PRECISION;
     }
 
     /**
      * 真实空间上限：nativeMaxIndex * percent / 100（向上取整，保留至少 1 档）。
-     * 真实最大值未缓存时返回 -1，调用方应视为映射不可用。
-     * native 上限只由真实最大值与限制百分比决定，与 virtualSteps 无关。
+     * 与调节精度无关；真实最大值未缓存时返回 -1。
      */
-    public int nativeLimit(int streamType, int steps, int percent) {
+    public int nativeLimit(int streamType, int percent) {
         int realMax = nativeMaxIndex(streamType);
-        if (!isActive(steps) || realMax <= 0) {
+        if (realMax <= 0) {
             return -1;
         }
         return calculateLimitedIndex(realMax, percent);
     }
 
     /**
-     * 虚拟索引 → 真实索引：
-     * round(virtualIndex * nativeLimit / virtualMaxIndex)，钳制在 0..nativeLimit。
-     * 阶数未激活或真实最大值未知时原样返回，保证直通。
+     * 音量键一次调整的步长：round(nativeMaxIndex / precision)，至少 1 档。
+     * 未缓存真实最大值或精度未激活时返回 -1，调用方应视为步进不可用。
      */
-    public int virtualToNative(int streamType, int virtualIndex, int steps, int percent) {
-        int vMax = virtualMaxIndex(steps);
-        int limit = nativeLimit(streamType, steps, percent);
-        if (!isActive(steps) || vMax <= 0 || limit < 0) {
-            return virtualIndex;
+    public int adjustStep(int streamType, int precision) {
+        int realMax = nativeMaxIndex(streamType);
+        if (!isActive(precision) || realMax <= 0) {
+            return -1;
         }
-        if (limit == 0) {
-            return 0;
+        return calculateAdjustStep(realMax, precision);
+    }
+
+    /** 纯静态步长计算：round(nativeMax / precision)，至少 1；参数无效返回 -1。 */
+    static int calculateAdjustStep(int nativeMax, int precision) {
+        if (nativeMax <= 0 || precision < PreferenceStorage.MIN_ADJUST_PRECISION) {
+            return -1;
         }
-        long mapped = Math.round((double) virtualIndex * limit / vMax);
-        return (int) Math.max(0L, Math.min(limit, mapped));
+        long step = Math.round((double) nativeMax / precision);
+        return (int) Math.max(1L, step);
     }
 
     /**
-     * 真实索引 → 虚拟索引：
-     * round(nativeIndex * virtualMaxIndex / nativeLimit)，钳制在 0..virtualMaxIndex。
-     * 阶数未激活或真实最大值未知时原样返回，保证直通。
+     * 反射读取 AudioSystem.getMaxVolumeIndex 真实值（不 hook native 方法）；
+     * 读取成功时顺便缓存到指定 mapper。失败返回 -1。
      */
-    public int nativeToVirtual(int streamType, int nativeIndex, int steps, int percent) {
-        int vMax = virtualMaxIndex(steps);
-        int limit = nativeLimit(streamType, steps, percent);
-        if (!isActive(steps) || vMax <= 0 || limit < 0) {
-            return nativeIndex;
+    static int readNativeMax(ClassLoader classLoader, int streamType,
+                             VolumeIndexMapper mapper) {
+        if (mapper.nativeMaxIndex(streamType) > 0) {
+            return mapper.nativeMaxIndex(streamType);
         }
-        if (limit == 0) {
-            return 0;
+        try {
+            Class<?> type = Class.forName("android.media.AudioSystem", false, classLoader);
+            for (Method method : type.getDeclaredMethods()) {
+                if (Modifier.isStatic(method.getModifiers())
+                        && method.getName().equals("getMaxVolumeIndex")
+                        && method.getParameterCount() == 1
+                        && method.getParameterTypes()[0] == int.class
+                        && method.getReturnType() == int.class) {
+                    method.setAccessible(true);
+                    Object result = method.invoke(null, streamType);
+                    if (result instanceof Integer value) {
+                        mapper.rememberNativeMax(streamType, value);
+                        return value;
+                    }
+                    return -1;
+                }
+            }
+        } catch (Throwable error) {
+            LogUtils.debug("VolumeMapper unable to read native max stream=" + streamType
+                    + ": " + error);
         }
-        long mapped = Math.round((double) nativeIndex * vMax / limit);
-        return (int) Math.max(0L, Math.min(vMax, mapped));
+        return -1;
     }
 
     /** 百分比 → 真实空间上限（与 VolumeAdjustHook 相同的溢出安全向上取整语义）。 */
