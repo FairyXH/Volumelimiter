@@ -245,8 +245,8 @@ public final class VolumeStepsHook {
                         logMapperInitialized(stream, config);
                         int virtualIndex = mapper.nativeToVirtual(stream, nativeIndex,
                                 config.volumeSteps, config.masterPercent());
-                        LogUtils.debug("VolumeSteps native -> virtual stream=" + stream
-                                + " native=" + nativeIndex + " virtual=" + virtualIndex);
+                        LogUtils.debug("VolumeMapper: stream=" + stream + " native=" + nativeIndex
+                                + " virtual=" + virtualIndex + " limit=" + config.masterPercent());
                         return virtualIndex;
                     });
             LogUtils.debug("VolumeSteps hooked AudioService.getStreamVolume");
@@ -285,8 +285,11 @@ public final class VolumeStepsHook {
                         logMapperInitialized(stream, config);
                         int nativeIndex = mapper.virtualToNative(stream, virtualIndex,
                                 config.volumeSteps, config.masterPercent());
-                        LogUtils.debug("VolumeSteps virtual -> native stream=" + stream
-                                + " virtual=" + virtualIndex + " native=" + nativeIndex);
+                        int nativeLimit = mapper.nativeLimit(stream, config.volumeSteps,
+                                config.masterPercent());
+                        LogUtils.debug("VolumeMapper: stream=" + stream + " virtual=" + virtualIndex
+                                + " native=" + nativeIndex + " limit=" + config.masterPercent()
+                                + " nativeLimit=" + nativeLimit);
                         Object[] changed = args.clone();
                         changed[indexPosition] = nativeIndex;
                         return chain.proceed(changed);
