@@ -131,6 +131,12 @@ public final class VolumePrecisionHook {
                             target = Math.min(target, nativeLimit);
                         }
                         target = Math.max(0, target);
+                        int flags = args.length > 2 && args[2] instanceof Integer
+                                ? (Integer) args[2] : 0;
+                        // 保证 SystemUI 音量条（VolumeDialog）显示：原生 adjust 链会把
+                        // FLAG_SHOW_UI 带给 sendVolumeUpdate，改走 setStreamVolume 后
+                        // 必须显式补上，否则屏幕浮条不弹出（控制中心滑块仍会变化）。
+                        flags |= AudioManager.FLAG_SHOW_UI;
                         // 每次按音量键都输出，用于确认 Hook 命中与实际入口
                         LogUtils.info("PrecisionHook: method=" + method.getName()
                                 + " stream=" + stream
@@ -138,12 +144,11 @@ public final class VolumePrecisionHook {
                                 + " direction=" + direction
                                 + " step=" + step
                                 + " newIndex=" + target
-                                + " limit=" + nativeLimit);
+                                + " limit=" + nativeLimit
+                                + " flags=" + flags);
                         if (target == current) {
                             return null;
                         }
-                        int flags = args.length > 2 && args[2] instanceof Integer
-                                ? (Integer) args[2] : 0;
                         callSetStreamVolume(chain.getThisObject(), stream, target, flags);
                         return null;
                     });
