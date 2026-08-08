@@ -1,6 +1,9 @@
 # Volumelimiter
 
-Volumelimiter 是一个基于 **libxposed API 101** 的 LSPosed 模块，用于限制 Android 11 及以上系统的最大音量。
+Volumelimiter 是一个基于 **libxposed API 101** 的 LSPosed 模块，为 Android 11 及以上系统提供两项独立的音量功能：
+
+1. **调节精度**：控制音量键一次调整多少档，不改动系统显示的最大音量。
+2. **最大音量限制**：把音量键、系统面板、应用 `setStreamVolume` 等所有路径的真实音量钳制到指定百分比。
 
 模块运行在 `system_server` 中，通过 Hook `AudioService` 处理硬件音量键、系统音量面板，以及应用通过 `AudioManager` 设置或调整音量的常见路径。它不修改 `/system`、`framework` 或 `services.jar`，配置通过 LSPosed Remote Preferences 实时同步。
 
@@ -13,6 +16,7 @@ Volumelimiter 是一个基于 **libxposed API 101** 的 LSPosed 模块，用于�
 - 为指定应用设置默认上限，并可进一步配置该应用的音量类别和输出设备上限。
 - 通过“直接调用包名 → AudioFocus 所有者 → 前台任务”识别当前音频应用。
 - 为媒体、铃声、通知、闹钟、系统声音、通话、Bluetooth SCO 和 Assistant 设置全局安全上限。
+- **调节精度**：设置从 0 到满音量需要按多少次音量键，例如 100 表示约按 100 次到满（每次约 最大值÷100 档）。
 - 创建、编辑、复制和删除音量模板。
 - 搜索全部已安装应用，跨搜索结果保持选择，并批量添加规则或应用模板。
 - 新应用安装后可自动套用默认模板，并可选发送通知。
@@ -39,7 +43,7 @@ Volumelimiter 是一个基于 **libxposed API 101** 的 LSPosed 模块，用于�
 4. 确认作用域为 **System Framework / 系统框架**。无需勾选音乐、视频等普通应用。
 5. 完整重启设备，使模块重新注入 `system_server`。
 6. 从 LSPosed 的 Volumelimiter 模块详情页打开设置。
-7. 开启“启用音量限制”，设置全局上限，再按需配置设备、应用、音量类别和模板。
+7. 开启“启用音量限制”，设置全局上限；按需开启“调节精度”，再配置设备、应用、音量类别和模板。
 
 首次安装、升级模块、修改作用域或重新启用模块后，应完整重启设备。仅重启播放器通常不会重新安装系统服务 Hook。
 
@@ -84,6 +88,20 @@ Volumelimiter 是一个基于 **libxposed API 101** 的 LSPosed 模块，用于�
 > 如果应用退出界面后仍在后台播放并继续持有 AudioFocus，继续使用该应用规则是预期行为。停止播放、释放 AudioFocus 或结束进程后才会回退。
 
 ## 使用说明
+
+### 设置调节精度
+
+“调节精度”与最大音量限制相互独立，只改变音量键一次调整的档位数：
+
+1. 在“调节精度”中输入从 0 到满音量需要按多少次音量键，例如 `100`。
+2. 保存后，音量键每次按约 `round(系统最大档位 ÷ 100)` 档；例如系统最大 160 档、精度 50 时，每次约 3 档。
+3. 留空或输入 `0` 恢复系统默认（每次 1 档）。
+
+关键行为：
+
+- **不改变显示**：系统音量面板始终显示 `x/160`，不会出现 `x/50`、`x/100`；
+- **只影响音量键步进**：`getStreamVolume`、`getStreamMaxVolume` 直通原值；
+- **限制独立**：即使调节精度关闭，最大音量限制仍按百分比生效。
 
 ### 设置全局上限
 
@@ -199,10 +217,10 @@ USB 音频、BLE Audio、助听器、投屏设备及厂商私有路由可能无�
 
 ## 上限档位计算
 
-Android 音量通常由离散档位表示。模块根据系统报告的最大档位计算限制档位：
+Android 音量通常由离散档位表示。模块始终在**真实音量空间**工作：系统显示仍为 `x/nativeMax`，限制档位按系统报告的最大档位计算：
 
 ```text
-限制档位 = ceil(系统最大档位 × 最终百分比 ÷ 100)
+nativeLimit = ceil(nativeMax × 最终百分比 ÷ 100)
 ```
 
 规则如下：
@@ -222,6 +240,46 @@ Android 音量通常由离散档位表示。模块根据系统报告的最大档
 | 80% | `ceil(15 × 80 / 100)` | 12 |
 
 硬件音量键使用系统当前活动音量类别进行判断。系统传入默认建议流时，模块会通过 `getActiveStreamType()` 解析，不会把 flags、uid 等后续参数误认为音量类别。
+
+## 调节精度步长计算
+
+调节精度只改变音量键一次调整的档位数，不改变真实最大音量：
+
+```text
+stepSize = round(nativeMax ÷ precision)，至少 1 档
+```
+
+| 系统最大档位 | 精度 | 每次按键 |
+|---:|---:|---:|
+| 160 | 50 | 约 3 档 |
+| 160 | 100 | 约 2 档 |
+| 160 | 1 | 一次到满 |
+| 15 | 50 | 1 档 |
+
+无论精度是 50 还是 100，满音量始终是 `nativeMax`（例如 160），与精度无关；上限仍由最大音量限制决定。
+
+## 音量链路
+
+```text
+音量键 / UI 拖动 / App 调用
+        │
+        ▼
+adjust* / setStreamVolume*（按名称前缀枚举，覆盖 OEM 变体）
+        │
+        ├─ HIGHEST：VolumeAdjustHook —— 真实空间限制
+        │     · set*：index > nativeLimit → clamp 到 nativeLimit
+        │     · adjust*：到达 nativeLimit 后阻止继续提高
+        │
+        ├─ LOWEST（仅 adjust*）：VolumePrecisionHook —— 精度步进
+        │     当前真实 index ± stepSize → clamp [0, nativeLimit] → setStreamVolume
+        │
+        └─ AudioService 原生逻辑（真实索引 0..nativeMaxIndex）→ AudioFlinger
+```
+
+- 限制与精度独立：精度关闭时限制仍生效；
+- 限制与精度都关闭时，模块不干预任何音量路径；
+- `getStreamVolume` / `getStreamMaxVolume` / `VolumeStreamState` 最大值 / `AudioSystem.getMaxVolumeIndex` 均不修改、不 Hook；
+- native 最大值通过 `AudioService.getStreamMaxVolume` 实例反射读取并缓存（Oplus/ColorOS 上 `AudioSystem` 静态反射可能不可用）。
 
 ## 示例
 
@@ -291,11 +349,12 @@ Android 音量通常由离散档位表示。模块根据系统报告的最大档
 2. 设置一个容易观察的全局上限，例如 `40%`。
 3. 播放媒体并连续按硬件音量加键，确认无法超过预期档位，同时仍可在限制范围内升降。
 4. 打开系统音量面板，确认拖动滑块也不能超过上限。
-5. 切换扬声器、蓝牙和有线耳机，分别验证设备规则。
-6. 为某应用设置明显不同的上限，在应用内按音量键验证规则。
-7. 停止播放并从多任务划掉应用，确认上限回退到设备或全局值。
-8. 测试后台播放，确认仍持有 AudioFocus 时继续应用播放器规则。
-9. 在 LSPosed 日志中筛选 `Volumelimiter`，确认存在 `Installed N AudioService hooks` 且 `N > 0` 的记录。
+5. **验证调节精度**：设置精度 `50`，按音量键确认每次约 `round(最大值÷50)` 档，且系统面板仍显示 `x/最大值`。
+6. 切换扬声器、蓝牙和有线耳机，分别验证设备规则。
+7. 为某应用设置明显不同的上限，在应用内按音量键验证规则。
+8. 停止播放并从多任务划掉应用，确认上限回退到设备或全局值。
+9. 测试后台播放，确认仍持有 AudioFocus 时继续应用播放器规则。
+10. 在 LSPosed 日志中筛选 `Volumelimiter`，确认存在 `Installed N AudioService hooks` 且 `N > 0` 的记录。
 
 修改规则后，如果当前音量已经高于新上限，模块不会主动制造一次音量事件立即降低它；下一次通过硬件按键、系统面板或应用接口调整音量时才会执行限制。
 
@@ -320,12 +379,34 @@ focusApp=... foregroundApp=... selectedApp=...
 appRuleMatched=true percent=20 maximum=3/15
 ```
 
+调节精度每次按音量键都会输出（info 级别，不受 Debug 开关影响），用于确认 Hook 命中与实际入口：
+
+```text
+PrecisionHook: method=adjustSuggestedStreamVolume stream=3
+oldIndex=38 direction=1 step=3 newIndex=41 limit=160 flags=4113
+```
+
+限制命中：
+
+```text
+LimitHook: clamped setStreamVolumeWithAttribution stream=3 requested=150 limited=80
+LimitHook: blocked adjustSuggestedStreamVolume stream=3 current=80 limit=80
+```
+
+音量条通知（Oplus/ColorOS 专用路径）：
+
+```text
+PrecisionHook: volume UI notified via mVolumeController stream=3 flags=4113
+PrecisionHook: sendVolumeUpdate not found, volume UI skipped
+```
+
 提交日志前，请删除账号、设备标识、蓝牙地址及其他隐私信息。
 
 ## 兼容性与已知限制
 
-- 当前 Hook 查找 `setStreamVolume`、`setStreamVolumeWithAttribution`、`adjustStreamVolume`、`adjustSuggestedStreamVolume` 和 `adjustSuggestedStreamVolumeForUid` 的兼容重载。
+- Hook 按方法名称前缀枚举并匹配兼容重载：`setStreamVolume*`、`adjustStreamVolume*`、`adjustSuggestedStreamVolume*`，覆盖 AOSP 与 OEM 变体（如 `adjustStreamVolumeWithAttribution`）。
 - 若 ROM 改名、彻底更改参数布局、绕过 `AudioService` 或阻止隐藏 API 访问，功能可能部分或全部失效。
+- 部分 ROM（如 Oplus/ColorOS）没有 AOSP 标准的 `sendVolumeUpdate(int,int,int,int)`，native 最大值也不能通过 `AudioSystem.getMaxVolumeIndex` 静态反射获取；模块会改用 `AudioService.getStreamMaxVolume` 实例反射读取，并通过 `mVolumeController.postVolumeChanged` 主动通知 SystemUI 显示音量条。
 - Hook 安装、路由识别、AudioFocus 跟踪和前台应用查询均采用失败放行策略；系统稳定性优先于强制限制。
 - AudioFocus 是音频所有权近似值。应用错误持有焦点或厂商修改焦点栈行为时，应用归属可能不准确。
 - 多窗口、分屏和画中画场景下，前台任务取决于系统返回结果。
@@ -361,6 +442,21 @@ appRuleMatched=true percent=20 maximum=3/15
 5. 总限制开关已开启；
 6. 当前输出设备、音量类别和应用与配置相符；
 7. LSPosed 日志中的 AudioService Hook 数量大于 0。
+
+### 调节精度不生效，音量键仍是系统默认步长
+
+1. 确认“调节精度”已保存非 0 数值；
+2. 按音量键后检查日志是否有 `PrecisionHook: method=...`；
+   - 没有该行：说明音量键走了未覆盖的 ROM 私有入口，请提供 `AudioService volume method (not hooked)` 日志；
+   - 有 `nativeMax unknown`：native 最大值读取失败，请提供 `VolumeMapper nativeMax ...` 日志。
+
+### 音量条不弹出
+
+模块改写 adjust 后主动补发 SystemUI 音量条通知。按音量键后检查：
+
+- `volume UI notified via mVolumeController`：通知已发出，若仍不弹，说明 ROM 的 VolumeDialog 需要更深的原生调用链；
+- `mVolumeController field not found` / `postVolumeChanged not found`：请提供相关日志与类名；
+- `mVolumeController is null`：SystemUI 未注册音量控制器，属系统状态问题。
 
 ### 应用规则不生效
 
@@ -420,11 +516,14 @@ app\build\outputs\apk\release\app-release.apk
 ```text
 app/src/main/java/io/github/fairyxh/volumelimiter/
 ├── MainHook.java
+├── VolumeLimiterApp.java
 ├── config/
 │   ├── BackupCodec.java
 │   ├── ConfigManager.java
 │   ├── LimitPolicy.java
 │   ├── PreferenceStorage.java
+│   ├── SystemConfigService.java
+│   ├── SystemRuleStore.java
 │   ├── TemplateRepository.java
 │   └── VolumeTemplate.java
 ├── hook/
@@ -433,16 +532,20 @@ app/src/main/java/io/github/fairyxh/volumelimiter/
 │   ├── AudioServiceHook.java
 │   ├── DeviceRouteHook.java
 │   ├── ForegroundAppResolver.java
-│   └── VolumeAdjustHook.java
-├── receiver/
-│   ├── NewAppProcessor.java
-│   └── NewAppReceiver.java
+│   ├── ForegroundChangeHook.java
+│   ├── SystemServerNewAppMonitor.java
+│   ├── VolumeAdjustHook.java        # 最大音量限制（真实空间，HIGHEST）
+│   ├── VolumeIndexMapper.java       # native 最大值缓存、限制档位、精度步长
+│   └── VolumePrecisionHook.java     # 调节精度（adjust 步进，LOWEST）
 ├── ui/
 │   ├── AppRuleActivity.java
+│   ├── ConfiguredRulesActivity.java
 │   ├── RemotePreferencesActivity.java
 │   ├── SettingsActivity.java
 │   └── TemplateEditActivity.java
 └── utils/
+    ├── AndroidVersionUtils.java
+    └── LogUtils.java
 ```
 
 现代 Xposed 元数据位于 `app/src/main/resources/META-INF/xposed/`：
@@ -464,6 +567,7 @@ Root / LSPosed 版本：
 音量类别：
 输出设备：
 总配置 / 设备配置 / 应用配置：
+调节精度：
 是否后台播放及 AudioFocus 状态：
 硬件音量键结果：
 系统音量面板结果：
