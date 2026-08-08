@@ -1,0 +1,40 @@
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::load has been called by net.rubygrapefruit.platform.internal.NativeLibraryLoader in an unnamed module (file:/D:/Users/Administrator/.gradle/wrapper/dists/gradle-9.3.1-bin/23ovyewtku6u96viwx3xl3oks/gradle-9.3.1/lib/native-platform-0.22-milestone-29.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+Starting a Gradle Daemon, 2 incompatible and 1 stopped Daemons could not be reused, use --status for details
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:generateDebugResources UP-TO-DATE
+> Task :app:packageDebugResources UP-TO-DATE
+> Task :app:processDebugNavigationResources UP-TO-DATE
+> Task :app:parseDebugLocalResources UP-TO-DATE
+> Task :app:generateDebugRFile UP-TO-DATE
+> Task :app:compileDebugKotlin NO-SOURCE
+> Task :app:javaPreCompileDebug UP-TO-DATE
+
+> Task :app:compileDebugJavaWithJavac FAILED
+D:\Files\Develop\Android\Volumelimiter\app\src\main\java\io\github\fairyxh\volumelimiter\hook\VolumeStepsHook.java:474: 错误: 无法从静态上下文中引用非静态 方法 virtualLimitIndex(int,int)
+        int limit = VolumeIndexMapper.virtualLimitIndex(steps, percent);
+                                     ^
+1 个错误
+
+[Incubating] Problems report is available at: file:///D:/Files/Develop/Android/Volumelimiter/build/reports/problems/problems-report.html
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':app:compileDebugJavaWithJavac'.
+> Compilation failed; see the compiler output below.
+  D:\Files\Develop\Android\Volumelimiter\app\src\main\java\io\github\fairyxh\volumelimiter\hook\VolumeStepsHook.java:474: 错误: 无法从静态上下文中引用非静态 方法 virtualLimitIndex(int,int)
+          int limit = VolumeIndexMapper.virtualLimitIndex(steps, percent);
+                                       ^
+  1 个错误
+
+* Try:
+> Check your code and dependencies to fix the compilation error(s)
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+
+BUILD FAILED in 8s
+7 actionable tasks: 1 executed, 6 up-to-date
