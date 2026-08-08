@@ -16,6 +16,7 @@ public final class VolumeAdjustHook {
     private final ConfigManager configManager;
     private final DeviceRouteHook deviceRouteHook;
     private final AudioAppResolver appResolver;
+    private final VolumeIndexMapper mapper;
     private Method getStreamMaxVolume;
     private Method getStreamVolume;
     private Method getActiveStreamType;
@@ -24,11 +25,12 @@ public final class VolumeAdjustHook {
     private final Map<Integer, Integer> lastLoweredLimit = new HashMap<>();
 
     public VolumeAdjustHook(ConfigManager configManager, DeviceRouteHook deviceRouteHook,
-                            AudioAppResolver appResolver,
+                            AudioAppResolver appResolver, VolumeIndexMapper mapper,
                             Class<?> audioServiceClass) {
         this.configManager = configManager;
         this.deviceRouteHook = deviceRouteHook;
         this.appResolver = appResolver;
+        this.mapper = mapper;
         getStreamMaxVolume = findIntMethod(audioServiceClass, "getStreamMaxVolume", 1);
         getStreamVolume = findIntMethod(audioServiceClass, "getStreamVolume", 1);
         getActiveStreamType = findIntMethod(audioServiceClass, "getActiveStreamType", 1);
@@ -46,12 +48,20 @@ public final class VolumeAdjustHook {
             try {
                 int current = invokeInt(getStreamVolume, service, streamType, -1);
                 int maximum = calculateMaximum(service, streamType, null, new Object[0]);
+                if (mapper.isActive(config.volumeSteps)) {
+                    current = mapper.virtualToNative(streamType, current,
+                            config.volumeSteps, config.masterPercent());
+                }
                 Integer last = lastLoweredLimit.get(streamType);
                 if (current >= 0 && current > maximum) {
                     // Only lower when the limit changes so the 100ms correction loop
                     // does not call setStreamVolume forever.
                     if (last == null || last != maximum) {
-                        lowerStream(service, streamType, maximum);
+                        int limitArgument = mapper.isActive(config.volumeSteps)
+                                ? mapper.nativeToVirtual(streamType, maximum,
+                                        config.volumeSteps, config.masterPercent())
+                                : maximum;
+                        lowerStream(service, streamType, limitArgument);
                         lastLoweredLimit.put(streamType, maximum);
                         LogUtils.debug("ActiveCorrection stream=" + streamType + " current="
                                 + current + " limit=" + maximum + " applied=true");
@@ -87,11 +97,23 @@ public final class VolumeAdjustHook {
         Integer explicitDevice = findExplicitDevice(method, originalArgs, indexPosition + 1);
         int maximum = calculateMaximum(audioService, streamType, explicitDevice, originalArgs);
         int requested = (Integer) originalArgs[indexPosition];
-        if (requested <= maximum) {
+        int requestedReal = requested;
+        if (mapper.isActive(config.volumeSteps)) {
+            requestedReal = mapper.virtualToNative(streamType, requested,
+                    config.volumeSteps, config.masterPercent());
+        }
+        if (requestedReal <= maximum) {
             return originalArgs;
         }
         Object[] changed = originalArgs.clone();
-        changed[indexPosition] = maximum;
+        if (mapper.isActive(config.volumeSteps)) {
+            // 调用方参数处于虚拟空间：clamp 结果也写回虚拟索引，由 VolumeStepsHook
+            // 在 LOWEST 优先级统一转回真实索引。
+            changed[indexPosition] = mapper.nativeToVirtual(streamType, maximum,
+                    config.volumeSteps, config.masterPercent());
+        } else {
+            changed[indexPosition] = maximum;
+        }
         LogUtils.debug(method.getName() + " stream=" + streamType + " requested=" + requested
                 + " limited=" + maximum);
         return changed;
@@ -114,6 +136,10 @@ public final class VolumeAdjustHook {
         }
         int maximum = calculateMaximum(audioService, streamType, null, args);
         int current = invokeInt(getStreamVolume, audioService, streamType, -1);
+        if (mapper.isActive(config.volumeSteps)) {
+            current = mapper.virtualToNative(streamType, current,
+                    config.volumeSteps, config.masterPercent());
+        }
         boolean blocked = current >= 0 && current >= maximum;
         if (blocked) {
             LogUtils.debug(method.getName() + " blocked stream=" + streamType + " current="
@@ -124,13 +150,25 @@ public final class VolumeAdjustHook {
 
     private int calculateMaximum(Object audioService, int streamType, Integer explicitDevice,
                                  Object[] hookArguments) {
-        int systemMaximum = invokeInt(getStreamMaxVolume, audioService, streamType, Integer.MAX_VALUE);
-        if (systemMaximum == Integer.MAX_VALUE) {
-            return systemMaximum;
+        ConfigManager.Snapshot config = configManager.snapshot();
+        int systemMaximum;
+        if (mapper.isActive(config.volumeSteps)) {
+            // 阶数激活时 getStreamMaxVolume 返回虚拟最大值；限制必须在真实空间决策，
+            // 因此直接使用 mapper 缓存的 native 最大值。缓存缺失时 fail-open。
+            systemMaximum = mapper.nativeMaxIndex(streamType);
+            if (systemMaximum < 0) {
+                return Integer.MAX_VALUE;
+            }
+        } else {
+            systemMaximum = invokeInt(getStreamMaxVolume, audioService, streamType,
+                    Integer.MAX_VALUE);
+            if (systemMaximum == Integer.MAX_VALUE) {
+                return systemMaximum;
+            }
         }
         String device = deviceRouteHook.resolve(audioService, streamType, explicitDevice);
         AudioAppResolver.Result apps = appResolver.resolve(hookArguments);
-        ConfigManager.Resolution resolution = configManager.snapshot().resolve(
+        ConfigManager.Resolution resolution = config.resolve(
                 streamType, device, apps.candidates);
         int maximum = calculateLimitedIndex(systemMaximum, resolution.percent);
         LogUtils.debug("LimitDecision stream=" + streamType + " device=" + device

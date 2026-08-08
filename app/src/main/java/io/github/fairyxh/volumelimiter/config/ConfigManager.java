@@ -71,6 +71,11 @@ public final class ConfigManager implements SharedPreferences.OnSharedPreference
             return perAppEnabled && packageName != null && appRules.containsKey(packageName);
         }
 
+        /** 全局最大音量百分比（真实空间上限 nativeLimit 的百分比）。 */
+        public int masterPercent() {
+            return masterPercent;
+        }
+
         public Resolution resolve(int streamType, String deviceKey, List<String> packageCandidates) {
             if (!enabled) {
                 return new Resolution(100, null, false);
