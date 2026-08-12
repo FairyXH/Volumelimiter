@@ -9,16 +9,15 @@ android {
     namespace = "io.github.fairyxh.volumelimiter"
     compileSdk = 36
     buildToolsVersion = "36.1.0"
-    val buildNumber =
-        SimpleDateFormat("yyyyMMddHH").format(Date())
+    val gitVersion = GitVersion.getVersion()
 
     defaultConfig {
         applicationId = "io.github.fairyxh.volumelimiter"
         minSdk = 30
         //noinspection OldTargetApi
         targetSdk = 36
-        versionCode = buildNumber.toInt()
-        versionName = buildNumber
+        versionName = gitVersion[0]
+        versionCode = gitVersion[1].toInt()
     }
 
     buildTypes {
