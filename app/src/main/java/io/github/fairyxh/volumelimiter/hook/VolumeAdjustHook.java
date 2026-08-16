@@ -126,6 +126,15 @@ public final class VolumeAdjustHook {
         if (streamType < 0) {
             return false;
         }
+        // 非真实通话模式下的通话/SCO 流可能是其他模块（如“禁止通话模式”强制媒体音量）的镜像流：
+        // VOICE_CALL 常驻其限制值（如 5/9），此时按音量键提高会被误 block，表现为音量键呼出
+        // 音量条但无法调整。真实通话（mode=IN_CALL/IN_COMMUNICATION）仍正常限制。
+        if ((streamType == AudioManager.STREAM_VOICE_CALL || streamType == 6)
+                && !isRealCallMode(audioService)) {
+            LogUtils.debug("LimitHook: skip block stream=" + streamType
+                    + " (not real call mode)");
+            return false;
+        }
         int maximum = calculateMaximum(audioService, streamType, null, args);
         int current = invokeInt(getStreamVolume, audioService, streamType, -1);
         boolean blocked = current >= 0 && current >= maximum;
@@ -167,6 +176,35 @@ public final class VolumeAdjustHook {
         return selectAdjustmentStream(method.getName(), args, directionPosition,
                 suggested -> invokeInt(getActiveStreamType, audioService, suggested,
                         AudioManager.STREAM_MUSIC));
+    }
+
+    /**
+     * 当前是否处于真实通话/通信模式。读取失败时视为通话模式（fail-open，保持原 block 行为）。
+     * 被“禁止通话模式”类模块强制 MODE_NORMAL 的 VoIP 会话返回 false，避免误 block 音量键。
+     */
+    private boolean isRealCallMode(Object audioService) {
+        if (audioService == null) {
+            return true;
+        }
+        try {
+            for (Class<?> current = audioService.getClass(); current != null;
+                 current = current.getSuperclass()) {
+                for (Method method : current.getDeclaredMethods()) {
+                    if (method.getName().equals("getMode") && method.getParameterCount() == 0) {
+                        method.setAccessible(true);
+                        Object value = method.invoke(audioService);
+                        if (value instanceof Integer mode) {
+                            return mode == AudioManager.MODE_IN_CALL
+                                    || mode == AudioManager.MODE_IN_COMMUNICATION
+                                    || mode == AudioManager.MODE_CALL_SCREENING;
+                        }
+                    }
+                }
+            }
+        } catch (Throwable error) {
+            LogUtils.debug("LimitHook: mode read failed; treat as call mode: " + error);
+        }
+        return true;
     }
 
     static int selectAdjustmentStream(String methodName, Object[] args, int directionPosition,
